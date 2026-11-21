@@ -13,11 +13,14 @@ track lives in `johnarleyburns/saldima-ios` and consumes golden vectors and the
 ## Source of truth
 
 1. The Saldima spec (Spec tab: Coding-agent handoff, License, Local development,
-   iPhone app; then Design tab). Local copy: `~/Downloads/Spec.md` on the
-   owner's machine; ask for a fresh export if it is missing.
-2. This file.
-3. `docs/plans/P0.md` and the phase plans in `docs/plans/`.
-4. The GitHub issue being worked. Its acceptance criteria are the definition of
+   iPhone app; then Design tab). Local copies: `~/Downloads/Spec.md` and
+   `~/Downloads/Design (HLD + LLD).md`; ask for a fresh export if either is
+   missing.
+2. The Go-to-market doc (`~/Downloads/Go-to-market.md`) for positioning and
+   launch constraints.
+3. This file.
+4. `docs/plans/P0.md` and the phase plans in `docs/plans/`.
+5. The GitHub issue being worked. Its acceptance criteria are the definition of
    done.
 
 If the spec and an issue disagree, stop and ask in the issue. Do not invent
@@ -41,18 +44,63 @@ relevant plan.
 
 ### Repository layout
 
+The Design tab is authoritative. Target layout:
+
 ```
-apps/web/            Worker, Hono routes, JSX views, Durable Object classes
-packages/gnucash/    GnuCash schema, Money, Guid, invariants (pure TS)
-packages/testkit/    Ports, deterministic fakes, contract suites
-packages/sync/       leases, snapshots, three-way merge (added in P3)
-fixtures/            anonymised books and golden vectors
-docs/plans/          phase checklists; docs/vectors.md for the iOS contract
-scripts/             gates, vector generation, reset/seed
+apps/web/src/
+  worker.ts          App Worker entry: static, signup API, Stripe webhook, routing
+  ports.ts           builds the real Ports from env bindings (only env reader)
+  edge/               tenant lookup, signup, webhook, refunds
+  book/
+    book.ts           class Book extends DurableObject
+    app.tsx           Hono sub-app at /app
+    api.ts            Hono sub-app at /api/v1 (device token, for apps)
+    routes/           accounts, register, reconcile, reports, sync, inbox, settings
+    views/            JSX pages and components
+    migrations/       gcw_ table migrations
+  env.d.ts            bindings and secrets
+packages/
+  gnucash/            schema, Money, Guid, invariants, queries, reports
+  gnucash-file/       .gnucash import/export over SQLite WASM
+  gnucash-xml/        streaming XML reader (later)
+  sync/               lease state machine, three-way merge by GUID
+  api-contract/       zod schemas, OpenAPI, recorded fixtures for saldima-ios
+  testkit/            Ports, fakes, manual clock, contract suites
+  importers/          CSV, OFX/QFX, QIF and matcher
+  billing/            Stripe Checkout, Billing, refunds
+  ui/                 shared JSX and CSS tokens
+containers/converter/ python3-gnucash, separate process only
+e2e/                  Playwright pages and device projects
+fixtures/books/       anonymised books by scenario and GnuCash version
+fixtures/vectors/     golden JSON replayed by saldima-ios
+tools/                seed, reset, introspect, oracle, vectors, license scan
+docs/plans/           phase checklists; docs/vectors.md for the iOS contract
 ```
 
-`packages/gnucash` is pure: no Cloudflare, Hono, Stripe, network or `fetch`.
-It must also run under plain Node for fast tests.
+P0 keeps a minimal surface (`apps/web/src/index.ts`, `app.ts`, `book.ts`) and
+defers the full `worker/edge/book` split to P1. Boundary rules still apply:
+
+- `packages/*` never import `cloudflare:workers`; they run in plain Node.
+- Only `packages/gnucash` and `packages/gnucash-file` touch GnuCash tables.
+- Only `apps/web/src/book` touches Durable Object storage; only `edge/` touches
+  KV and Stripe.
+- Views never query: routes load through `packages/gnucash`, views render plain
+  objects.
+- `packages/gnucash` is pure: no Cloudflare, Hono, Stripe, network or `fetch`.
+
+## Product and launch constraints (Go-to-market)
+
+- Positioning: "Your GnuCash books in any browser and on your phone. $5 a
+  month. Download your file any time." Lead with the free AGPL self-host
+  version; the hosted plan is the convenience option.
+- The name is **Saldima**; never put "gnucash" in a product, repo or domain
+  name. Say "compatible with GnuCash".
+- No analytics, third-party scripts, fonts or ads in the app. The marketing
+  site is static and self-hosted.
+- The AGPL source offer is in the web footer (and the iPhone About screen).
+- Before launch: a one-page site with a waitlist, then 10–20 beta testers. Paid
+  ads only after a month of real conversion data, capped at $300/month.
+- The public roadmap and docs are the AI-assistant channel; keep them accurate.
 
 ## Commands
 
