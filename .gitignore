@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+node_modules/
+.pnpm-store/
+coverage/
+dist/
+.wrangler/
+.dev.vars
+.env
+.env.*
+playwright-report/
+test-results/
+*.tsbuildinfo
+.DS_Store

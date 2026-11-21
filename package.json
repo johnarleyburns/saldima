@@ -1,0 +1,33 @@
+{
+  "name": "saldima",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Saldima: hosted, GnuCash-compatible accounting. Compatible with GnuCash.",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check . && node scripts/check-gates.mjs",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "pnpm test:unit",
+    "test:unit": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "check:spdx": "node scripts/check-spdx.mjs",
+    "check:licenses": "node scripts/license-scan.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
+    "vectors": "node scripts/vectors.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.4",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^4.0.8",
+    "fast-check": "^4.3.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.8"
+  }
+}
