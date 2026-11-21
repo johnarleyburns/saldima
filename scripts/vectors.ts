@@ -134,6 +134,76 @@ export function buildMoneyVectors(): Record<string, unknown> {
   };
 }
 
+const SYNTHETIC_ACCOUNTS = [
+  {
+    guid: "11111111111111111111111111111111",
+    name: "Assets",
+    type: "ASSET",
+    parent: null,
+    hidden: false,
+    placeholder: false,
+  },
+  {
+    guid: "22222222222222222222222222222222",
+    name: "Bank",
+    type: "BANK",
+    parent: "11111111111111111111111111111111",
+    hidden: false,
+    placeholder: false,
+  },
+  {
+    guid: "33333333333333333333333333333333",
+    name: "Checking",
+    type: "BANK",
+    parent: "22222222222222222222222222222222",
+    hidden: false,
+    placeholder: false,
+  },
+  {
+    guid: "44444444444444444444444444444444",
+    name: "Expenses",
+    type: "EXPENSE",
+    parent: null,
+    hidden: false,
+    placeholder: false,
+  },
+  {
+    guid: "55555555555555555555555555555555",
+    name: "Rent",
+    type: "EXPENSE",
+    parent: "44444444444444444444444444444444",
+    hidden: false,
+    placeholder: false,
+  },
+  {
+    guid: "66666666666666666666666666666666",
+    name: "Income",
+    type: "INCOME",
+    parent: null,
+    hidden: false,
+    placeholder: false,
+  },
+  {
+    guid: "77777777777777777777777777777777",
+    name: "Salary",
+    type: "INCOME",
+    parent: "66666666666666666666666666666666",
+    hidden: false,
+    placeholder: false,
+  },
+] as const;
+
+export function buildAccountVectors(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    book: "synthetic-mini",
+    note: "Synthetic fixture shared with saldima-ios. A real-book vector awaits the owner's fixture.",
+    accounts: [...SYNTHETIC_ACCOUNTS]
+      .map((account) => ({ ...account }))
+      .sort((left, right) => left.guid.localeCompare(right.guid)),
+  };
+}
+
 export function buildGuidVectors(): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -162,6 +232,7 @@ export function buildIndex(): Record<string, unknown> {
       "Saldima golden vectors. Replay, do not reinterpret. Pinned by web commit.",
     money: "money.json",
     guid: "guid.json",
+    accounts: "accounts.json",
   };
 }
 
@@ -170,6 +241,7 @@ export function buildVectors(): Record<string, string> {
     "index.json": `${JSON.stringify(buildIndex(), null, 2)}\n`,
     "money.json": `${JSON.stringify(buildMoneyVectors(), null, 2)}\n`,
     "guid.json": `${JSON.stringify(buildGuidVectors(), null, 2)}\n`,
+    "accounts.json": `${JSON.stringify(buildAccountVectors(), null, 2)}\n`,
   };
 }
 
@@ -210,6 +282,6 @@ if (invoked) {
     console.log("vectors: committed files match the generator.");
   } else {
     writeVectors();
-    console.log("vectors: wrote fixtures/vectors/{index,money,guid}.json");
+    console.log("vectors: wrote fixtures/vectors/{index,money,guid,accounts}.json");
   }
 }

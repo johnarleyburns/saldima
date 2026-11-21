@@ -29,5 +29,13 @@ describe("golden vectors", () => {
     };
     expect(guid.valid).toHaveLength(4);
     expect(guid.invalid).toContain("not-a-guid");
+
+    const accounts = JSON.parse(files["accounts.json"] ?? "{}") as {
+      accounts?: Array<{ guid: string; parent: string | null }>;
+    };
+    const list = accounts.accounts ?? [];
+    expect(list).toHaveLength(7);
+    expect(list.filter((account) => account.parent === null)).toHaveLength(3);
+    expect(new Set(list.map((account) => account.guid)).size).toBe(7);
   });
 });
