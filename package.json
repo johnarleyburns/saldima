@@ -21,10 +21,13 @@
     "check:licenses": "node scripts/license-scan.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "vectors": "node scripts/vectors.mjs",
-    "check:workflows": "./scripts/check-workflows.sh"
+    "check:workflows": "./scripts/check-workflows.sh",
+    "test:runtime": "vitest run --config vitest.runtime.config.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.4",
+    "@cloudflare/vitest-plugin": "1.9.0",
+    "@cloudflare/workers-types": "^5.20261120.1",
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^4.0.8",
     "fast-check": "^4.3.0",

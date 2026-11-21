@@ -9,7 +9,4 @@ minimumReleaseAgeExclude:
   - "@cloudflare/workers-utils@0.56.0"
   - miniflare@5.20261119.0-beta
   - wrangler@4.166.0
-
-onlyBuiltDependencies:
-  - esbuild
-  - workerd
+  - "@cloudflare/vitest-plugin@1.9.0"
