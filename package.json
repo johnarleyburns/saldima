@@ -20,7 +20,8 @@
     "check:spdx": "node scripts/check-spdx.mjs",
     "check:licenses": "node scripts/license-scan.mjs",
     "check:docs": "node scripts/check-docs.mjs",
-    "vectors": "node scripts/vectors.mjs"
+    "vectors": "node scripts/vectors.mjs",
+    "check:workflows": "./scripts/check-workflows.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.4",
@@ -28,6 +29,7 @@
     "@vitest/coverage-v8": "^4.0.8",
     "fast-check": "^4.3.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.8"
+    "vitest": "^4.0.8",
+    "wrangler": "4.166.0"
   }
 }
