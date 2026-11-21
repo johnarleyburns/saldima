@@ -23,6 +23,10 @@ tracks. The web suite generates it; the Swift suite replays it.
   regenerate, and land it on the web before the iOS code that consumes it.
 - The iPhone generator script must fail if `schemaVersion` is newer than it
   understands.
+- `accounts.json` is generated from a synthetic fixture so the iPhone tree
+  builder can be compared across tracks now. A real-book tree vector replaces
+  it once the owner supplies the anonymised book (web P0-5); the file name and
+  schema stay the same.
 
 ## Regenerating
 
