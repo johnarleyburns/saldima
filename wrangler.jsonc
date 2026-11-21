@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "saldima",
+  "main": "apps/web/src/index.ts",
+  "compatibility_date": "2026-11-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": { "ENVIRONMENT": "local" },
+  "kv_namespaces": [{ "binding": "KV", "id": "saldima-local-kv" }],
+  "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-local-snapshots" }],
+  "durable_objects": {
+    "bindings": [{ "name": "BOOK", "class_name": "Book" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Book"] }],
+  "env": {
+    "staging": {
+      "name": "saldima-staging",
+      "vars": { "ENVIRONMENT": "staging" },
+      "kv_namespaces": [{ "binding": "KV", "id": "REPLACE_WITH_STAGING_KV_ID" }],
+      "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-staging-snapshots" }],
+      "durable_objects": {
+        "bindings": [{ "name": "BOOK", "class_name": "Book" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Book"] }]
+    },
+    "production": {
+      "name": "saldima-production",
+      "vars": { "ENVIRONMENT": "production" },
+      "kv_namespaces": [{ "binding": "KV", "id": "REPLACE_WITH_PRODUCTION_KV_ID" }],
+      "r2_buckets": [
+        { "binding": "R2", "bucket_name": "saldima-production-snapshots" }
+      ],
+      "durable_objects": {
+        "bindings": [{ "name": "BOOK", "class_name": "Book" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Book"] }]
+    }
+  }
+}
