@@ -20,9 +20,10 @@
     "check:spdx": "node scripts/check-spdx.mjs",
     "check:licenses": "node scripts/license-scan.mjs",
     "check:docs": "node scripts/check-docs.mjs",
-    "vectors": "node scripts/vectors.mjs",
+    "vectors": "tsx scripts/vectors.ts",
     "check:workflows": "./scripts/check-workflows.sh",
-    "test:runtime": "vitest run --config vitest.runtime.config.ts"
+    "test:runtime": "vitest run --config vitest.runtime.config.ts",
+    "vectors:check": "tsx scripts/vectors.ts --check"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.4",
@@ -31,6 +32,7 @@
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^4.0.8",
     "fast-check": "^4.3.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^4.0.8",
     "wrangler": "4.166.0"
