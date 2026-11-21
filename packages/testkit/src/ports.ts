@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-/** A GnuCash GUID: 32 lowercase hex characters. Tightened to a branded type in P0-4. */
-export type Guid = string;
+import type { Guid } from "@saldima/gnucash";
+
+export type { Guid };
 
 /** Every non-deterministic or async dependency enters through this object. */
 export interface Ports {
