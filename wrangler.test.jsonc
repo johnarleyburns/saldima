@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "saldima-runtime-test",
+  "main": "packages/testkit/src/runtime/worker.ts",
+  "compatibility_date": "2026-11-20",
+  "observability": { "enabled": false },
+  "kv_namespaces": [{ "binding": "KV", "id": "saldima-test-kv" }],
+  "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-test-r2" }]
+}
