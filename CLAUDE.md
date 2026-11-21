@@ -56,21 +56,21 @@ It must also run under plain Node for fast tests.
 
 ## Commands
 
-| Command | Purpose |
-| --- | --- |
-| `pnpm install` | install the workspace (Node 22+, pnpm 11+) |
-| `pnpm dev` | `wrangler dev`; `http://alice.localhost:8787`, `http://bob.localhost:8787` |
-| `pnpm reset` | wipe `.wrangler/state`, seed two demo tenants from fixtures |
-| `pnpm typecheck` | `tsc --noEmit` across the workspace |
-| `pnpm lint` | Biome + AST gates (money numbers, `Math.random`, raw clock) |
-| `pnpm test:unit` | Vitest in Node with fakes; must stay under 30 s |
-| `pnpm test:runtime` | Vitest in workerd with real DO/KV/R2 bindings |
-| `pnpm test:coverage` | unit + runtime coverage; CI requires >= 90% lines on `packages/*` |
-| `pnpm e2e` | Playwright against the local stack (`--ui` for UI mode) |
-| `pnpm e2e:ci` | headless Playwright across iPhone, Android and desktop projects |
-| `pnpm vectors` | regenerate `fixtures/vectors/*.json` deterministically |
-| `pnpm check:licenses` | dependency license scan (GPL/AGPL/unknown fail) |
-| `pnpm check:spdx` | every tracked source file has an SPDX header |
+| Command               | Purpose                                                                    |
+| --------------------- | -------------------------------------------------------------------------- |
+| `pnpm install`        | install the workspace (Node 22+, pnpm 11+)                                 |
+| `pnpm dev`            | `wrangler dev`; `http://alice.localhost:8787`, `http://bob.localhost:8787` |
+| `pnpm reset`          | wipe `.wrangler/state`, seed two demo tenants from fixtures                |
+| `pnpm typecheck`      | `tsc --noEmit` across the workspace                                        |
+| `pnpm lint`           | Biome + AST gates (money numbers, `Math.random`, raw clock)                |
+| `pnpm test:unit`      | Vitest in Node with fakes; must stay under 30 s                            |
+| `pnpm test:runtime`   | Vitest in workerd with real DO/KV/R2 bindings                              |
+| `pnpm test:coverage`  | unit + runtime coverage; CI requires >= 90% lines on `packages/*`          |
+| `pnpm e2e`            | Playwright against the local stack (`--ui` for UI mode)                    |
+| `pnpm e2e:ci`         | headless Playwright across iPhone, Android and desktop projects            |
+| `pnpm vectors`        | regenerate `fixtures/vectors/*.json` deterministically                     |
+| `pnpm check:licenses` | dependency license scan (GPL/AGPL/unknown fail)                            |
+| `pnpm check:spdx`     | every tracked source file has an SPDX header                               |
 
 Never run a deploy command. `wrangler deploy` is owner-only and lives in
 protected GitHub Environments.
