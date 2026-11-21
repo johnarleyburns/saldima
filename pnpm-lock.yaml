@@ -44,7 +44,11 @@ importers:
 
   packages/gnucash: {}
 
-  packages/testkit: {}
+  packages/testkit:
+    dependencies:
+      '@saldima/gnucash':
+        specifier: workspace:*
+        version: link:../gnucash
 
 packages:
 
