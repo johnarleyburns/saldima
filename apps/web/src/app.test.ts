@@ -45,6 +45,15 @@ describe("tenant resolution before routing", () => {
     });
   });
 
+  it("serves the production and staging apexes as marketing", async () => {
+    const app = createApp();
+    for (const host of ["saldima.com", "www.saldima.com", "stage.saldima.com"]) {
+      const response = await app.request(`http://${host}/health`, {}, env());
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true, tenant: null, host });
+    }
+  });
+
   it("routes a custom hostname through KV", async () => {
     const app = createApp();
     const kv = new InMemoryKeyValueStore();
