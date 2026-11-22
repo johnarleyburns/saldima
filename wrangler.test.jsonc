@@ -5,6 +5,13 @@
   "main": "packages/testkit/src/runtime/worker.ts",
   "compatibility_date": "2026-11-20",
   "observability": { "enabled": false },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "SETUP_TOKEN": "test-setup-token",
+    "MASTER_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+  },
   "kv_namespaces": [{ "binding": "KV", "id": "saldima-test-kv" }],
-  "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-test-r2" }]
+  "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-test-r2" }],
+  "durable_objects": { "bindings": [{ "name": "BOOK", "class_name": "Book" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Book"] }]
 }

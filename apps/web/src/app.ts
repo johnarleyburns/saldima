@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 
 import type { KvNamespaceLike } from "./ports/cloudflare-kv.ts";
 import type { R2BucketLike } from "./ports/cloudflare-r2.ts";
 
+export interface BookNamespaceLike {
+  idFromName(name: string): unknown;
+  get(id: unknown): { fetch(request: Request): Promise<Response> };
+}
+
 export interface AppBindings {
   KV: Pick<KvNamespaceLike, "get" | "put">;
   R2: R2BucketLike;
-  BOOK: unknown;
+  BOOK: BookNamespaceLike;
 }
 
 interface AppVariables {
@@ -97,7 +102,14 @@ export function createApp(): Hono<AppEnv> {
 </html>`);
   });
 
-  app.get("/app", (c) => c.text(`Book ${c.get("tenantId") ?? ""}`));
+  const forwardToBook = async (c: Context<AppEnv>) => {
+    const tenantId = c.get("tenantId");
+    if (!tenantId) return c.text("No book at this address", 404);
+    const stub = c.env.BOOK.get(c.env.BOOK.idFromName(tenantId));
+    return stub.fetch(c.req.raw);
+  };
+  app.all("/app", forwardToBook);
+  app.all("/app/*", forwardToBook);
 
   return app;
 }

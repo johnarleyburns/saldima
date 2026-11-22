@@ -2,4 +2,5 @@
 
 export * from "./guid.ts";
 export * from "./money.ts";
+export * from "./new-guid.ts";
 export * from "./versions.ts";

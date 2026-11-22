@@ -24,7 +24,6 @@ const MONEY_TOKENS = new Set([
   "rate",
   "subtotal",
   "sum",
-  "value",
 ]);
 
 /** @param {string} name */
