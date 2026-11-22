@@ -75,6 +75,35 @@ describe("tenant resolution before routing", () => {
     expect(response.status).toBe(404);
   });
 
+  it("forwards /app requests to the tenant Book object", async () => {
+    const app = createApp();
+    let tenant = "";
+    const response = await app.request(
+      "http://alice.localhost/app/login",
+      {},
+      {
+        KV: new InMemoryKeyValueStore(),
+        R2: {} as never,
+        BOOK: {
+          idFromName(name: string) {
+            tenant = name;
+            return name;
+          },
+          get() {
+            return {
+              async fetch(request: Request) {
+                return new Response(new URL(request.url).pathname);
+              },
+            };
+          },
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("/app/login");
+    expect(tenant).toBe("tenant-alice");
+  });
+
   it("keeps tenant content out of the marketing page", async () => {
     const app = createApp();
     const response = await app.request("http://alice.localhost/", {}, env());
