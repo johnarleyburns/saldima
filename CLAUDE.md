@@ -107,7 +107,10 @@ defers the full `worker/edge/book` split to P1. Boundary rules still apply:
 | Command               | Purpose                                                                    |
 | --------------------- | -------------------------------------------------------------------------- |
 | `pnpm install`        | install the workspace (Node 22+, pnpm 11+)                                 |
-| `pnpm dev`            | `wrangler dev`; `http://alice.localhost:8787`, `http://bob.localhost:8787` |
+| `pnpm dev`            | `scripts/dev.sh`; `http://alice.localhost:8787`, `http://bob.localhost:8787` |
+| `pnpm deploy:local`    | same as `pnpm dev` |
+| `pnpm deploy:staging`  | deploy `saldima-staging`, seed demo tenants, smoke `stage.saldima.com` |
+| `pnpm deploy:production` | owner-only; requires `-- --yes` or `CONFIRM_PRODUCTION=DEPLOY` |
 | `pnpm reset`          | wipe `.wrangler/state`, seed two demo tenants from fixtures                |
 | `pnpm typecheck`      | `tsc --noEmit` across the workspace                                        |
 | `pnpm lint`           | Biome + AST gates (money numbers, `Math.random`, raw clock)                |
