@@ -104,24 +104,24 @@ defers the full `worker/edge/book` split to P1. Boundary rules still apply:
 
 ## Commands
 
-| Command               | Purpose                                                                    |
-| --------------------- | -------------------------------------------------------------------------- |
-| `pnpm install`        | install the workspace (Node 22+, pnpm 11+)                                 |
-| `pnpm dev`            | `scripts/dev.sh`; `http://alice.localhost:8787`, `http://bob.localhost:8787` |
-| `pnpm deploy:local`    | same as `pnpm dev` |
-| `pnpm deploy:staging`  | deploy `saldima-staging`, seed demo tenants, smoke `stage.saldima.com` |
-| `pnpm deploy:production` | owner-only; requires `-- --yes` or `CONFIRM_PRODUCTION=DEPLOY` |
-| `pnpm reset`          | wipe `.wrangler/state`, seed two demo tenants from fixtures                |
-| `pnpm typecheck`      | `tsc --noEmit` across the workspace                                        |
-| `pnpm lint`           | Biome + AST gates (money numbers, `Math.random`, raw clock)                |
-| `pnpm test:unit`      | Vitest in Node with fakes; must stay under 30 s                            |
-| `pnpm test:runtime`   | Vitest in workerd with real DO/KV/R2 bindings                              |
-| `pnpm test:coverage`  | unit + runtime coverage; CI requires >= 90% lines on `packages/*`          |
-| `pnpm e2e`            | Playwright against the local stack (`--ui` for UI mode)                    |
-| `pnpm e2e:ci`         | headless Playwright across iPhone, Android and desktop projects            |
-| `pnpm vectors`        | regenerate `fixtures/vectors/*.json` deterministically                     |
-| `pnpm check:licenses` | dependency license scan (GPL/AGPL/unknown fail)                            |
-| `pnpm check:spdx`     | every tracked source file has an SPDX header                               |
+| Command                  | Purpose                                                                      |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| `pnpm install`           | install the workspace (Node 22+, pnpm 11+)                                   |
+| `pnpm dev`               | `scripts/dev.sh`; `http://alice.localhost:8787`, `http://bob.localhost:8787` |
+| `pnpm deploy:local`      | same as `pnpm dev`                                                           |
+| `pnpm deploy:staging`    | deploy `saldima-staging`, seed demo tenants, smoke `stage.saldima.com`       |
+| `pnpm deploy:production` | owner-only; requires `-- --yes` or `CONFIRM_PRODUCTION=DEPLOY`               |
+| `pnpm reset`             | wipe `.wrangler/state`, seed two demo tenants from fixtures                  |
+| `pnpm typecheck`         | `tsc --noEmit` across the workspace                                          |
+| `pnpm lint`              | Biome + AST gates (money numbers, `Math.random`, raw clock)                  |
+| `pnpm test:unit`         | Vitest in Node with fakes; must stay under 30 s                              |
+| `pnpm test:runtime`      | Vitest in workerd with real DO/KV/R2 bindings                                |
+| `pnpm test:coverage`     | unit + runtime coverage; CI requires >= 90% lines on `packages/*`            |
+| `pnpm e2e`               | Playwright against the local stack (`--ui` for UI mode)                      |
+| `pnpm e2e:ci`            | headless Playwright across iPhone, Android and desktop projects              |
+| `pnpm vectors`           | regenerate `fixtures/vectors/*.json` deterministically                       |
+| `pnpm check:licenses`    | dependency license scan (GPL/AGPL/unknown fail)                              |
+| `pnpm check:spdx`        | every tracked source file has an SPDX header                                 |
 
 Never run a deploy command. `wrangler deploy` is owner-only and lives in
 protected GitHub Environments.
