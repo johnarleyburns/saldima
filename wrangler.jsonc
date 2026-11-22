@@ -17,7 +17,13 @@
     "staging": {
       "name": "saldima-staging",
       "vars": { "ENVIRONMENT": "staging" },
-      "kv_namespaces": [{ "binding": "KV", "id": "REPLACE_WITH_STAGING_KV_ID" }],
+      "workers_dev": false,
+      "routes": [
+        { "pattern": "stage.saldima.com", "custom_domain": true },
+        { "pattern": "alice-stage.saldima.com", "custom_domain": true },
+        { "pattern": "bob-stage.saldima.com", "custom_domain": true }
+      ],
+      "kv_namespaces": [{ "binding": "KV", "id": "673d280b3ced423f90282134a619e6f5" }],
       "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-staging-snapshots" }],
       "durable_objects": {
         "bindings": [{ "name": "BOOK", "class_name": "Book" }]

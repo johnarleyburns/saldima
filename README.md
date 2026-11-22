@@ -28,7 +28,15 @@ pnpm lint
 pnpm test:unit
 ```
 
-`pnpm dev` currently starts once the Cloudflare scaffold lands (P0-6).
+`pnpm dev` starts the local Workers runtime at `http://alice.localhost:8787`
+and `http://bob.localhost:8787`.
+
+Deployments use the same script:
+
+```sh
+pnpm deploy:staging     # stage.saldima.com
+pnpm deploy:production  # owner approval required: -- --yes
+```
 
 ## Licence
 
