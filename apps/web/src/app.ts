@@ -17,7 +17,14 @@ interface AppVariables {
 
 type AppEnv = { Bindings: AppBindings; Variables: AppVariables };
 
-const APEX_HOSTS = new Set(["localhost", "saldima.test", "www.saldima.test"]);
+const APEX_HOSTS = new Set([
+  "localhost",
+  "saldima.com",
+  "www.saldima.com",
+  "stage.saldima.com",
+  "saldima.test",
+  "www.saldima.test",
+]);
 const LOCAL_SUBDOMAIN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 function escapeHtml(value: string): string {
