@@ -12,6 +12,7 @@ import {
   hashPassword,
   isSameOrigin,
   newTotpSecret,
+  PASSWORD_ITERATIONS,
   readCookie,
   sessionCookie,
   sha256Hex,
@@ -22,6 +23,9 @@ import {
 } from "./auth.ts";
 
 describe("password hashing", () => {
+  it("stays within Cloudflare WebCrypto's PBKDF2 limit", () => {
+    expect(PASSWORD_ITERATIONS).toBeLessThanOrEqual(100_000);
+  });
   it("verifies only the right password", async () => {
     const stored = await hashPassword("correct horse battery staple", 1_000);
     expect(stored.startsWith("pbkdf2$1000$")).toBe(true);

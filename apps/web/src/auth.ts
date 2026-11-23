@@ -88,7 +88,9 @@ async function derivePassword(
   return new Uint8Array(bits);
 }
 
-export const PASSWORD_ITERATIONS = 600_000;
+// Cloudflare's WebCrypto rejects PBKDF2 iteration counts above 100,000.
+// Keep the stored format versioned so this can move if the platform does.
+export const PASSWORD_ITERATIONS = 100_000;
 export const MIN_PASSWORD_LENGTH = 12;
 
 export async function hashPassword(
