@@ -117,3 +117,118 @@ describe("tenant resolution before routing", () => {
     expect(html).toContain("Saldima");
   });
 });
+
+describe("Stripe signup", () => {
+  function signing(payload: string, secret: string, timestamp: number) {
+    return (async () => {
+      const key = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const digest = new Uint8Array(
+        await crypto.subtle.sign(
+          "HMAC",
+          key,
+          new TextEncoder().encode(`${timestamp}.${payload}`),
+        ),
+      );
+      const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+      return `t=${timestamp},v1=${hex}`;
+    })();
+  }
+
+  const stripeEnv = (kv: InMemoryKeyValueStore, fetchImpl: typeof fetch) => ({
+    KV: kv,
+    R2: {} as never,
+    BOOK: {
+      idFromName: (name: string) => name,
+      get: () => ({
+        async fetch(request: Request) {
+          if (new URL(request.url).pathname === "/internal/provision") {
+            return Response.json({ token: "setup-token" });
+          }
+          return new Response("book");
+        },
+      }),
+    },
+    STRIPE_SECRET_KEY: "sk_test_fake",
+    STRIPE_PRICE_MONTHLY: "price_month",
+    STRIPE_PRICE_YEARLY: "price_year",
+    STRIPE_WEBHOOK_SECRET: "whsec_test",
+    PROVISION_SECRET: "provision-secret",
+    TENANT_DOMAIN: "saldima.com",
+    TENANT_SUFFIX: "-dev",
+    APP_ORIGIN: "https://dev.saldima.com",
+    FETCH: fetchImpl,
+  });
+
+  it("starts a Checkout Session and redirects to Stripe", async () => {
+    const kv = new InMemoryKeyValueStore();
+    let body = "";
+    const fakeFetch = (async (_url: string, init: RequestInit) => {
+      body = String(init.body);
+      return Response.json({ id: "cs_1", url: "https://checkout.stripe.test/1" });
+    }) as typeof fetch;
+    const response = await createApp().request(
+      "http://dev.saldima.com/api/signup/checkout",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          name: "acme",
+          email: "owner@example.test",
+          plan: "yearly",
+        }),
+      },
+      stripeEnv(kv, fakeFetch),
+    );
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("https://checkout.stripe.test/1");
+    expect(body).toContain("price_year");
+    expect(body).toContain("dev.saldima.com%2Fbilling%2Fsuccess");
+  });
+
+  it("provisions a tenant from a signed webhook and exposes the setup link", async () => {
+    const kv = new InMemoryKeyValueStore();
+    const env = stripeEnv(kv, fetch);
+    const event = JSON.stringify({
+      id: "evt_1",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_1",
+          customer_email: "owner@example.test",
+          metadata: { tenantName: "acme", plan: "yearly", email: "owner@example.test" },
+        },
+      },
+    });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = await signing(event, "whsec_test", timestamp);
+    const response = await createApp().request(
+      "http://dev.saldima.com/stripe/webhook",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "stripe-signature": signature },
+        body: event,
+      },
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(await kv.get("host:acme-dev.saldima.com")).toMatch(/^tenant-/);
+    expect(await kv.get("checkout:cs_1")).toContain(
+      "https://acme-dev.saldima.com/app/setup?token=setup-token",
+    );
+
+    const success = await createApp().request(
+      "http://dev.saldima.com/billing/success?session_id=cs_1",
+      {},
+      env,
+    );
+    expect(await success.text()).toContain(
+      "https://acme-dev.saldima.com/app/setup?token=setup-token",
+    );
+  });
+});

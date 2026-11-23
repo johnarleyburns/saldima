@@ -57,8 +57,8 @@ No Stripe custom domain is needed.
 In the Checkout Session request set:
 
 ```text
-success_url = https://dev.saldima.com/app/billing/success?session_id={CHECKOUT_SESSION_ID}
-cancel_url  = https://dev.saldima.com/app/billing/cancel
+success_url = https://dev.saldima.com/billing/success?session_id={CHECKOUT_SESSION_ID}
+cancel_url  = https://dev.saldima.com/billing/cancel
 ```
 
 `{CHECKOUT_SESSION_ID}` is a literal Stripe placeholder (do not URL-encode the
@@ -73,8 +73,8 @@ const session = await stripe.checkout.sessions.create({
   mode: "subscription",
   line_items: [{ price: env.STRIPE_PRICE_YEARLY, quantity: 1 }],
   success_url:
-    "https://dev.saldima.com/app/billing/success?session_id={CHECKOUT_SESSION_ID}",
-  cancel_url: "https://dev.saldima.com/app/billing/cancel",
+    "https://dev.saldima.com/billing/success?session_id={CHECKOUT_SESSION_ID}",
+  cancel_url: "https://dev.saldima.com/billing/cancel",
   customer_email: email,
 });
 // redirect the browser to session.url

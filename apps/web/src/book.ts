@@ -22,7 +22,7 @@ import {
   verifyTotp,
 } from "./auth.ts";
 import { deleteAccount } from "./data-access/accounts.ts";
-import { deleteSession } from "./data-access/auth-store.ts";
+import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
 import { totpQrSvg } from "./qr.ts";
 import {
   ACCOUNT_TYPES,
@@ -37,6 +37,7 @@ import { epochMs, isoAfterSeconds, nowIso } from "./time/system-clock.ts";
 export interface BookEnv {
   ENVIRONMENT?: string;
   SETUP_TOKEN?: string;
+  PROVISION_SECRET?: string;
   MASTER_KEY?: string;
 }
 
@@ -75,6 +76,12 @@ interface SessionRow {
 
 interface CredentialRow {
   secret: string;
+}
+
+interface SetupTokenRow {
+  token_hash: string;
+  email: string;
+  expires_at: string;
 }
 
 interface AccountRow {
@@ -184,6 +191,14 @@ export class Book {
       )`,
     );
     this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS gcw_setup_tokens (
+        token_hash TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+    );
+    this.sql.exec(
       `CREATE TABLE IF NOT EXISTS accounts (
         guid TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -214,6 +229,7 @@ export class Book {
       if (error instanceof Error && error.stack) console.error(error.stack);
       return c.text("Internal Server Error", 500);
     });
+    app.post("/internal/provision", (c) => this.internalProvision(c));
     app.get("/health", (c) =>
       c.json({
         ok: true,
@@ -225,7 +241,7 @@ export class Book {
     app.get("/app/login", (c) => this.loginPage(c));
     app.post("/app/login", (c) => this.login(c));
     app.post("/app/logout", (c) => this.logout(c));
-    app.get("/app/setup", (c) => this.setupPage(c));
+    app.get("/app/setup", (c) => this.setupPage(c, "", c.req.query("token") ?? ""));
     app.post("/app/setup", (c) => this.setup(c));
     app.get("/app/settings", (c) => this.settingsPage(c));
     app.get("/app/accounts", (c) => this.accountsPage(c));
@@ -356,18 +372,66 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     return c.redirect("/app/security/totp");
   }
 
-  private setupAllowed(): boolean {
-    if (this.userCount() > 0) return false;
-    if (this.env.SETUP_TOKEN) return true;
-    return this.env.ENVIRONMENT === "local";
+  private async internalProvision(c: BookContext): Promise<Response> {
+    const secret = this.env.PROVISION_SECRET;
+    if (!secret || c.req.header("authorization") !== `Bearer ${secret}`) {
+      return c.text("Forbidden", 403);
+    }
+    const body = (await c.req.json()) as { email?: unknown };
+    if (
+      typeof body.email !== "string" ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)
+    ) {
+      return c.json({ error: "valid email required" }, 400);
+    }
+    const token = await newSessionToken();
+    const hash = await sha256Hex(token);
+    this.sql.exec(
+      `INSERT INTO gcw_setup_tokens (token_hash, email, expires_at, created_at)
+       VALUES (?, ?, ?, ?)`,
+      hash,
+      body.email.toLowerCase(),
+      isoAfterSeconds(24 * 60 * 60),
+      nowIso(),
+    );
+    return c.json({ token });
   }
 
-  private setupPage(c: BookContext, error = ""): Response {
-    if (!this.setupAllowed()) return c.text("Not found", 404);
-    const tokenField = this.env.SETUP_TOKEN
-      ? `<label for="token">Setup token</label>
+  private async setupTokenFor(raw: string): Promise<SetupTokenRow | null> {
+    if (!raw) return null;
+    const hash = await sha256Hex(raw);
+    const row =
+      this.rows<SetupTokenRow>(
+        `SELECT token_hash, email, expires_at FROM gcw_setup_tokens
+         WHERE token_hash = ? LIMIT 1`,
+        hash,
+      )[0] ?? null;
+    if (!row) return null;
+    if (row.expires_at <= nowIso()) {
+      deleteSetupToken(this.sql, hash);
+      return null;
+    }
+    return row;
+  }
+
+  private async setupPage(
+    c: BookContext,
+    error = "",
+    incomingToken = "",
+  ): Promise<Response> {
+    if (this.userCount() > 0) return c.text("Not found", 404);
+    const record = await this.setupTokenFor(incomingToken);
+    const allowed =
+      record !== null ||
+      Boolean(this.env.SETUP_TOKEN) ||
+      this.env.ENVIRONMENT === "local";
+    if (!allowed) return c.text("Not found", 404);
+    const tokenField = record
+      ? `<input type="hidden" name="token" value="${escapeHtml(incomingToken)}">`
+      : this.env.SETUP_TOKEN
+        ? `<label for="token">Setup token</label>
 <input id="token" name="token" type="password" autocomplete="one-time-code" required>`
-      : "";
+        : "";
     return c.html(
       page(
         "Set up",
@@ -383,7 +447,7 @@ ${TEMPLATE_IDS.map((id) => `<option value="${id}">${escapeHtml(templateById(id).
 <label for="name">Name</label>
 <input id="name" name="name" type="text" autocomplete="name" required>
 <label for="email">Email</label>
-<input id="email" name="email" type="email" autocomplete="username" required>
+<input id="email" name="email" type="email" autocomplete="username" required value="${escapeHtml(record?.email ?? "")}"${record ? " readonly" : ""}>
 <label for="password">Password (at least ${MIN_PASSWORD_LENGTH} characters)</label>
 <input id="password" name="password" type="password" autocomplete="new-password" minlength="${MIN_PASSWORD_LENGTH}" required>
 <button type="submit">Create owner</button>
@@ -395,16 +459,23 @@ ${TEMPLATE_IDS.map((id) => `<option value="${id}">${escapeHtml(templateById(id).
 
   private async setup(c: BookContext): Promise<Response> {
     if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
-    if (!this.setupAllowed()) return c.text("Not found", 404);
+    if (this.userCount() > 0) return c.text("Not found", 404);
     const body = await c.req.parseBody();
-    if (
-      this.env.SETUP_TOKEN &&
-      !timingSafeStringEqual(formValue(body, "token"), this.env.SETUP_TOKEN)
-    ) {
+    const rawToken = formValue(body, "token");
+    const record = await this.setupTokenFor(rawToken);
+    const envTokenOk =
+      Boolean(this.env.SETUP_TOKEN) &&
+      timingSafeStringEqual(rawToken, this.env.SETUP_TOKEN ?? "");
+    if (!record && !envTokenOk && this.env.ENVIRONMENT !== "local") {
+      return record
+        ? this.setupPage(c, "The setup token is invalid.")
+        : c.text("Not found", 404);
+    }
+    if (this.env.SETUP_TOKEN && !record && !envTokenOk) {
       return this.setupPage(c, "The setup token is incorrect.");
     }
     const name = formValue(body, "name");
-    const email = formValue(body, "email").toLowerCase();
+    const email = (record?.email ?? formValue(body, "email")).toLowerCase();
     const password = formValue(body, "password");
     if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return this.setupPage(c, "Enter a name and a valid email address.");
@@ -426,6 +497,7 @@ ${TEMPLATE_IDS.map((id) => `<option value="${id}">${escapeHtml(templateById(id).
       nowIso(),
     );
     this.seedAccounts(templateById(formValue(body, "template")));
+    if (record) deleteSetupToken(this.sql, record.token_hash);
     await this.startSession(c, userId);
     return c.redirect("/app/security/totp");
   }

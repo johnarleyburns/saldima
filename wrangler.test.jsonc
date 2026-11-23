@@ -8,6 +8,7 @@
   "vars": {
     "ENVIRONMENT": "local",
     "SETUP_TOKEN": "local-setup-token",
+    "PROVISION_SECRET": "test-provision-secret",
     "MASTER_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
   },
   "kv_namespaces": [{ "binding": "KV", "id": "saldima-test-kv" }],
