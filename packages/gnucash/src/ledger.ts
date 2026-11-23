@@ -7,6 +7,7 @@ import {
   type Money,
   money,
   negateMoney,
+  roundToFractionHalfUp,
   subtractMoney,
 } from "./money.ts";
 
@@ -38,6 +39,8 @@ export interface Transaction {
   readonly id: Guid;
   readonly date: string;
   readonly description: string;
+  /** Transaction currency fraction; split values normalise to this with half-up. */
+  readonly fraction?: bigint;
   readonly splits: readonly Split[];
 }
 
@@ -103,11 +106,18 @@ export function post(ledger: Ledger, transaction: Transaction): Ledger {
     throw new LedgerError("TOO_FEW_SPLITS", "a transaction needs at least two splits");
   }
   const accounts = new Set(ledger.accounts.map((account) => account.id));
-  let total = ZERO;
-  for (const split of transaction.splits) {
+  const fraction = transaction.fraction ?? 100n;
+  const normalizedSplits = transaction.splits.map((split) => {
     if (!accounts.has(split.accountId)) {
       throw new LedgerError("UNKNOWN_ACCOUNT", `unknown account ${split.accountId}`);
     }
+    return {
+      accountId: split.accountId,
+      value: roundToFractionHalfUp(split.value, fraction),
+    };
+  });
+  let total = ZERO;
+  for (const split of normalizedSplits) {
     total = addMoney(total, split.value);
   }
   if (!equalsMoney(total, ZERO)) {
@@ -115,7 +125,10 @@ export function post(ledger: Ledger, transaction: Transaction): Ledger {
   }
   return {
     accounts: ledger.accounts,
-    transactions: [...ledger.transactions, transaction],
+    transactions: [
+      ...ledger.transactions,
+      { ...transaction, fraction, splits: normalizedSplits },
+    ],
   };
 }
 

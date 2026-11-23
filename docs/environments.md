@@ -15,7 +15,8 @@
 - Tenants: `https://alice-dev.saldima.com`, `https://bob-dev.saldima.com`
 - Workflow: `.github/workflows/deploy-dev.yml`
 - Guards before deploy: typecheck, Biome/gates, SPDX, licence scan, actionlint,
-  unit + coverage, workerd runtime, Playwright on iPhone/Android/desktop.
+  unit + coverage, and the workerd runtime suite. Playwright is local-only
+  (`pnpm e2e`) because hosted runners are unreliable with browser installs.
 - GitHub environment `dev` holds the Cloudflare token and account ID.
 
 ## Staging

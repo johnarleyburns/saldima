@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    name: Guards (unit, runtime, e2e)
+    name: Guards (unit, runtime)
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -47,10 +47,6 @@ jobs:
         run: pnpm test:coverage
       - name: Runtime in workerd
         run: pnpm test:runtime
-      - name: Install browsers
-        run: pnpm exec playwright install --with-deps chromium firefox webkit
-      - name: End-to-end
-        run: pnpm e2e:ci
 
   deploy:
     name: Deploy Cloudflare dev

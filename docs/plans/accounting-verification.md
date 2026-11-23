@@ -46,10 +46,9 @@ journals are rejected. Research and source references:
 
 ## Open decisions and risks
 
-- **Rounding conflict:** GnuCash posts at the commodity fraction with
-  half-up; `Money.roundToFraction` is half-to-even. Do not ship money posting
-  until this is decided (P2). The verification fixtures should include a
-  2.665-case to expose it.
+- **Rounding decision:** posting normalisation is half-up (`toScu` /
+  `roundToFractionHalfUp`), matching GnuCash; report display keeps half-even.
+  The 2.665 → 2.67 case is in the ledger tests.
 - **Report HTML is not an API.** Pin the oracle image and fail loudly on
   layout/version drift; parse by `acct-guid`, not names.
 - **Locale/timezone:** force `TZ=UTC`, `LC_ALL=C`, isolated `HOME`/`XDG_*`.
