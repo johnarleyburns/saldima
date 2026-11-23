@@ -14,6 +14,22 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Book"] }],
   "env": {
+    "dev": {
+      "name": "saldima-dev",
+      "vars": { "ENVIRONMENT": "dev" },
+      "workers_dev": false,
+      "routes": [
+        { "pattern": "dev.saldima.com", "custom_domain": true },
+        { "pattern": "alice-dev.saldima.com", "custom_domain": true },
+        { "pattern": "bob-dev.saldima.com", "custom_domain": true }
+      ],
+      "kv_namespaces": [{ "binding": "KV", "id": "354373cf643b456c8a58a8e69460bb2b" }],
+      "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-dev-snapshots" }],
+      "durable_objects": {
+        "bindings": [{ "name": "BOOK", "class_name": "Book" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Book"] }]
+    },
     "staging": {
       "name": "saldima-staging",
       "vars": { "ENVIRONMENT": "staging" },

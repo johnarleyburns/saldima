@@ -4,6 +4,7 @@
 # Deploy Saldima with the same path locally, on staging and in production.
 #
 #   ./scripts/deploy.sh local                 # wrangler dev on *.localhost:8787
+#   ./scripts/deploy.sh dev [--skip-checks]   # auto-deployed by CI on main
 #   ./scripts/deploy.sh staging [--dry-run]   # deploy the staging environment
 #   ./scripts/deploy.sh production --yes      # owner-approved production deploy
 #
@@ -15,10 +16,12 @@ cd "$(dirname "$0")/.."
 TARGET="${1:-}"
 DRY_RUN=0
 CONFIRM=0
+SKIP_CHECKS=0
 for arg in "${@:2}"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --yes) CONFIRM=1 ;;
+        --skip-checks) SKIP_CHECKS=1 ;;
         *) echo "Unknown option: $arg" >&2; exit 1 ;;
     esac
 done
@@ -32,8 +35,8 @@ if [ "$TARGET" = "local" ]; then
     exec ./scripts/dev.sh
 fi
 
-if [ "$TARGET" != "staging" ] && [ "$TARGET" != "production" ]; then
-    echo "Unknown target: $TARGET (use local, staging or production)" >&2
+if [ "$TARGET" != "dev" ] && [ "$TARGET" != "staging" ] && [ "$TARGET" != "production" ]; then
+    echo "Unknown target: $TARGET (use local, dev, staging or production)" >&2
     exit 1
 fi
 
@@ -56,7 +59,7 @@ if [ "$TARGET" = "production" ] && [ "$DRY_RUN" -eq 0 ]; then
     fi
 fi
 
-if [ "$DRY_RUN" -eq 0 ]; then
+if [ "$DRY_RUN" -eq 0 ] && [ "$SKIP_CHECKS" -eq 0 ]; then
     echo "==> Typecheck, lint and unit tests"
     pnpm typecheck
     pnpm lint
@@ -72,20 +75,30 @@ fi
 echo "==> Deploying $TARGET"
 pnpm exec wrangler deploy --env "$TARGET"
 
-if [ "$TARGET" = "staging" ]; then
-    echo "==> Seeding staging demo tenants"
-    pnpm exec wrangler kv key put --binding KV --env staging --remote \
-        "host:alice-stage.saldima.com" "tenant-alice" >/dev/null
-    pnpm exec wrangler kv key put --binding KV --env staging --remote \
-        "host:bob-stage.saldima.com" "tenant-bob" >/dev/null
+if [ "$TARGET" = "dev" ] || [ "$TARGET" = "staging" ]; then
+    if [ "$TARGET" = "dev" ]; then
+        PREFIX="dev"
+        ALICE="alice-dev.saldima.com"
+        BOB="bob-dev.saldima.com"
+    else
+        PREFIX="stage"
+        ALICE="alice-stage.saldima.com"
+        BOB="bob-stage.saldima.com"
+    fi
 
-    echo "==> Smoke-testing staging"
-    curl -fsS --max-time 20 https://stage.saldima.com/health | grep -q '"ok":true'
-    curl -fsS --max-time 20 https://alice-stage.saldima.com/health | grep -q 'tenant-alice'
-    curl -fsS --max-time 20 https://bob-stage.saldima.com/health | grep -q 'tenant-bob'
-    echo "staging: https://stage.saldima.com"
-    echo "alice:   https://alice-stage.saldima.com"
-    echo "bob:     https://bob-stage.saldima.com"
+    echo "==> Seeding $TARGET demo tenants"
+    pnpm exec wrangler kv key put --binding KV --env "$TARGET" --remote \
+        "host:$ALICE" "tenant-alice" >/dev/null
+    pnpm exec wrangler kv key put --binding KV --env "$TARGET" --remote \
+        "host:$BOB" "tenant-bob" >/dev/null
+
+    echo "==> Smoke-testing $TARGET"
+    curl -fsS --max-time 20 "https://$PREFIX.saldima.com/health" | grep -q '"ok":true'
+    curl -fsS --max-time 20 "https://$ALICE/health" | grep -q 'tenant-alice'
+    curl -fsS --max-time 20 "https://$BOB/health" | grep -q 'tenant-bob'
+    echo "$TARGET: https://$PREFIX.saldima.com"
+    echo "alice: https://$ALICE"
+    echo "bob:   https://$BOB"
 else
     echo "==> Smoke-testing production"
     curl -fsS --max-time 20 https://saldima.com/health | grep -q '"ok":true'

@@ -30,7 +30,8 @@
     "e2e:ci": "./scripts/e2e.sh",
     "deploy:local": "./scripts/deploy.sh local",
     "deploy:staging": "./scripts/deploy.sh staging",
-    "deploy:production": "./scripts/deploy.sh production"
+    "deploy:production": "./scripts/deploy.sh production",
+    "deploy:dev": "./scripts/deploy.sh dev"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.4",
