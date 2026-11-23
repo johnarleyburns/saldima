@@ -110,6 +110,17 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   await page.getByRole("button", { name: "Add account" }).click();
   await expect(page.getByText("Petty Cash")).toBeVisible();
 
+  await page.getByRole("link", { name: "Petty Cash", exact: true }).click();
+  await page.getByLabel("Name").fill("Petty Cash Box");
+  await page.getByLabel("Hidden").check();
+  await page.getByRole("button", { name: "Save account" }).click();
+  await expect(page.getByText("Petty Cash Box")).toBeVisible();
+  await expect(page.getByText("hidden")).toBeVisible();
+
+  await page.getByRole("link", { name: "Petty Cash Box", exact: true }).click();
+  await page.getByRole("button", { name: "Delete account" }).click();
+  await expect(page.getByText("Petty Cash Box")).toHaveCount(0);
+
   await page.getByRole("link", { name: "Back" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
