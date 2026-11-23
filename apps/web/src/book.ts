@@ -159,6 +159,14 @@ export class Book {
       await next();
     });
 
+    app.onError((error, c) => {
+      console.error(
+        "book_error",
+        error instanceof Error ? error.message : String(error),
+      );
+      if (error instanceof Error && error.stack) console.error(error.stack);
+      return c.text("Internal Server Error", 500);
+    });
     app.get("/health", (c) =>
       c.json({
         ok: true,
