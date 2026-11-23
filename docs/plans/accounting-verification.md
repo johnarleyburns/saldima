@@ -61,10 +61,24 @@ equity $97,000; TB $123,000. Scenario IDs are listed in the research file.
 | 4   | Void + reverse                    |  1,380 |         200 |               380 |        1,180 |     500 |      120 | 380 |
 | 5   | Reconcile flags                   |  1,680 |         200 |               680 |        1,480 |     800 |      120 | 680 |
 
+## Authoritative sources and review
+
+See `docs/research/gaap-sources.md`. There is no free answer-key dataset of
+journal entries. FASB ASC is authoritative but paid; AICPA illustrations are
+non-authoritative and copyrighted; OpenStax is CC BY-NC-SA (not compatible with
+this AGPL/commercial repo); GnuCash tests are GPL and may not be copied. Use
+standard citations, original scenarios, an independent implementation, the
+GnuCash oracle and a named CPA reviewer. Fixtures need `framework`,
+`standardRefs`, `reviewedBy`, `reviewedAt` before being called vetted.
+
 ## Checklist
 
 - [x] Ledger, trial balance, balance sheet, P&L and invariants with property tests.
 - [ ] Scenario DSL and the first five JSON fixtures with exact expected cents.
+- [ ] Fixture schema with `framework`, `standardRefs`, reviewer metadata.
+- [ ] GnuCash test-parity matrix (behaviour, clean-room; no GPL copying).
+- [ ] CPA review protocol for GAAP scenarios.
+- [ ] Optional SEC XBRL statement-level tie-out.
 - [ ] Pinned blank book generator and `gnucash-cli` saved-report runner.
 - [ ] HTML parser by account GUID and the cents comparator.
 - [ ] `pnpm test:oracle` in a pinned CI container (`gnucash-cli` 5.14/5.17).
