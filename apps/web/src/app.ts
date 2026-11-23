@@ -27,6 +27,7 @@ const APEX_HOSTS = new Set([
   "saldima.com",
   "www.saldima.com",
   "stage.saldima.com",
+  "dev.saldima.com",
   "saldima.test",
   "www.saldima.test",
 ]);

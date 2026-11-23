@@ -34,6 +34,7 @@ and `http://bob.localhost:8787`.
 Deployments use the same script:
 
 ```sh
+pnpm deploy:dev         # dev.saldima.com (also auto-deployed on main)
 pnpm deploy:staging     # stage.saldima.com
 pnpm deploy:production  # owner approval required: -- --yes
 pnpm e2e                # Playwright setup/login journey on an isolated local state
