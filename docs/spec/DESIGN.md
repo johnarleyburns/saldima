@@ -380,6 +380,15 @@ Critical end-to-end journeys that must pass before any production deploy: sign u
 
 Budgets are checked in CI: CPU and memory from the runtime tests, page timings from a Playwright run against staging.
 
+## Interface parity and in-app help
+
+A GnuCash desktop user must be productive on the web and mobile without
+retraining. Menus, tree behaviour, register columns, terminology and the help
+topic structure follow GnuCash; the screens and prose are ours. See
+`docs/spec/INTERFACE.md` for the mapping tables, tree/keyboard rules, the help
+system and the acceptance task list. GnuCash help text, icons and screenshots
+are GPL and are never copied.
+
 ## iPhone app design (saldima-ios)
 
 The iPhone app mirrors the web's packages in Swift. Accounting logic is pure and tested with fakes; the app target only draws screens.
