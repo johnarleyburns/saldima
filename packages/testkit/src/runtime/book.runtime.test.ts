@@ -51,6 +51,7 @@ describe("Book auth in workerd", () => {
         name: "Runtime Owner",
         email: "owner@example.test",
         password: "correct horse battery staple",
+        template: "insurance-agency",
       }),
     });
     expect(setup.status).toBe(302);
@@ -79,6 +80,19 @@ describe("Book auth in workerd", () => {
     expect(dashboard.status).toBe(200);
     expect(await dashboard.text()).toContain("owner@example.test");
 
+    const accounts = await request(stub, "/app/accounts", { headers: { cookie } });
+    expect(accounts.status).toBe(200);
+    expect(await accounts.text()).toContain("Premium Trust");
+
+    const created = await request(stub, "/app/accounts", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ name: "Petty Cash", type: "BANK", parent: "" }),
+    });
+    expect(created.status).toBe(302);
+    const afterCreate = await request(stub, "/app/accounts", { headers: { cookie } });
+    expect(await afterCreate.text()).toContain("Petty Cash");
+
     const closed = await request(stub, "/app/setup");
     expect(closed.status).toBe(404);
 
@@ -94,6 +108,7 @@ describe("Book auth in workerd", () => {
       body: new URLSearchParams({
         email: "owner@example.test",
         password: "correct horse battery staple",
+        template: "insurance-agency",
       }),
     });
     expect(login.status).toBe(302);
