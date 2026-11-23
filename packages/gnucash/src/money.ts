@@ -121,7 +121,8 @@ export function decimalPlaces(fraction: bigint): number {
 
 const DECIMAL = /^([+-]?)(\d+)(?:\.(\d+))?$/;
 
-export function parseMoney(text: string, fraction: bigint): Money {
+/** Parse an exact decimal without rounding. */
+export function parseDecimal(text: string): Money {
   const match = DECIMAL.exec(text);
   if (!match) throw new RangeError(`not a decimal amount: ${text}`);
   const sign = match[1] === "-" ? -1n : 1n;
@@ -129,7 +130,17 @@ export function parseMoney(text: string, fraction: bigint): Money {
   const decimals = match[3] ?? "";
   const scale = 10n ** BigInt(decimals.length);
   const numerator = sign * (whole * scale + BigInt(decimals === "" ? "0" : decimals));
-  return roundToFraction({ num: numerator, denom: scale }, fraction);
+  return { num: numerator, denom: scale };
+}
+
+/** Report/display parsing (half-even), retained for compatibility. */
+export function parseMoney(text: string, fraction: bigint): Money {
+  return roundToFraction(parseDecimal(text), fraction);
+}
+
+/** Posting parsing: exact decimal then GnuCash half-up normalisation. */
+export function parseMoneyHalfUp(text: string, fraction: bigint): Money {
+  return roundToFractionHalfUp(parseDecimal(text), fraction);
 }
 
 export function formatMoney(value: Money, fraction: bigint): string {

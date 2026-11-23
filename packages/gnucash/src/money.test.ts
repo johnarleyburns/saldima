@@ -10,7 +10,9 @@ import {
   multiplyMoney,
   negateMoney,
   normalizeMoney,
+  parseDecimal,
   parseMoney,
+  parseMoneyHalfUp,
   roundToFraction,
   roundToFractionHalfUp,
   subtractMoney,
@@ -114,6 +116,9 @@ describe("Money: parse and format", () => {
     expect(() => parseMoney("1e3", 100n)).toThrow();
     expect(() => parseMoney("", 100n)).toThrow();
     expect(() => formatMoney(cents(1n), 3n)).toThrow(RangeError);
+    expect(parseDecimal("2.665")).toEqual({ num: 2665n, denom: 1000n });
+    expect(parseMoneyHalfUp("2.665", 100n)).toEqual({ num: 267n, denom: 100n });
+    expect(parseMoneyHalfUp("-2.665", 100n)).toEqual({ num: -267n, denom: 100n });
   });
 });
 
