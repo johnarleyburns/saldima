@@ -116,6 +116,12 @@ code { display: block; overflow-wrap: anywhere; padding: 0.75rem; background: Fi
 .qr { max-width: 15rem; margin: 1rem auto; padding: 0.75rem; background: white; border-radius: 0.75rem; }
 .qr svg { display: block; width: 100%; height: auto; }
 .danger { background: #991b1b; }
+.appbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; }
+.appbar .brand { color: inherit; font-weight: 700; text-decoration: none; }
+.appbar nav { display: flex; gap: 1rem; }
+.appbar nav a { display: inline-flex; align-items: center; min-height: 44px; color: inherit; }
+.appfoot { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid color-mix(in srgb, GrayText 40%, transparent); font-size: 0.9rem; color: GrayText; }
+.appfoot a { color: inherit; }
 nav a { color: inherit; }
 </style>
 </head>
@@ -221,6 +227,7 @@ export class Book {
     app.post("/app/logout", (c) => this.logout(c));
     app.get("/app/setup", (c) => this.setupPage(c));
     app.post("/app/setup", (c) => this.setup(c));
+    app.get("/app/settings", (c) => this.settingsPage(c));
     app.get("/app/accounts", (c) => this.accountsPage(c));
     app.get("/app/accounts/new", (c) => this.newAccountPage(c));
     app.post("/app/accounts", (c) => this.createAccount(c));
@@ -662,7 +669,7 @@ ${this.renderAccountTree(node.children, depth + 1)}
     const account = this.accountByGuid(guid);
     if (!account) return c.text("Account not found", 404);
     return c.html(
-      page(
+      this.appPage(
         "Edit account",
         `<h1>Edit account</h1>
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
@@ -759,7 +766,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     return c.html(
-      page(
+      this.appPage(
         "Chart of accounts",
         `<h1>Chart of accounts</h1>
 <p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a></p>
@@ -774,7 +781,7 @@ ${this.renderAccountTree(this.accountsTree())}`,
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     return c.html(
-      page(
+      this.appPage(
         "Add account",
         `<h1>Add account</h1>
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
@@ -822,6 +829,37 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     return c.redirect("/app/accounts");
   }
 
+  private appPage(title: string, body: string): string {
+    return page(
+      title,
+      `<header class="appbar">
+<a class="brand" href="/app">Saldima</a>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/settings">Settings</a></nav>
+</header>
+${body}
+<footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
+    );
+  }
+
+  private async settingsPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const user = this.userById(session.user_id);
+    if (!user) return c.redirect("/app/login");
+    return c.html(
+      this.appPage(
+        "Settings",
+        `<h1>Settings</h1>
+<p class="muted">Book ${escapeHtml(c.get("tenantId"))}</p>
+<p>Signed in as <strong>${escapeHtml(user.email)}</strong> (${escapeHtml(user.role)}).</p>
+<p>Two-factor authentication is enabled.</p>
+<form method="post" action="/app/logout"><button type="submit">Sign out</button></form>`,
+      ),
+      200,
+    );
+  }
+
   private async dashboard(c: BookContext): Promise<Response> {
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
@@ -829,7 +867,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const user = this.userById(session.user_id);
     if (!user) return c.redirect("/app/login");
     return c.html(
-      page(
+      this.appPage(
         "Book",
         `<h1>Saldima</h1>
 <p class="muted">Book ${escapeHtml(c.get("tenantId"))}</p>
