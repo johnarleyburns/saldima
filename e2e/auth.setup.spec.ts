@@ -121,7 +121,21 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   await page.getByRole("button", { name: "Delete account" }).click();
   await expect(page.getByText("Petty Cash Box")).toHaveCount(0);
 
-  await page.getByRole("link", { name: "Back" }).click();
+  await page.getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByText(email)).toBeVisible();
+  await expect(page.getByRole("link", { name: "Source code" })).toBeVisible();
+
+  await page.getByRole("link", { name: "Accounts" }).click();
+  await expect(page.getByText("Premium Trust")).toBeVisible();
+  for (const width of [375, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    const fits = await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    );
+    expect(fits, `layout overflows at ${width}px`).toBe(true);
+  }
+
+  await page.getByRole("link", { name: "Saldima" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 

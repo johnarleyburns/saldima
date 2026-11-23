@@ -78,7 +78,17 @@ describe("Book auth in workerd", () => {
 
     const dashboard = await request(stub, "/app", { headers: { cookie } });
     expect(dashboard.status).toBe(200);
-    expect(await dashboard.text()).toContain("owner@example.test");
+    const dashboardHtml = await dashboard.text();
+    expect(dashboardHtml).toContain("owner@example.test");
+    expect(dashboardHtml).toContain('href="/app/accounts"');
+    expect(dashboardHtml).toContain('href="/app/settings"');
+    expect(dashboardHtml).toContain("github.com/johnarleyburns/saldima");
+
+    const settings = await request(stub, "/app/settings", { headers: { cookie } });
+    expect(settings.status).toBe(200);
+    const settingsHtml = await settings.text();
+    expect(settingsHtml).toContain("owner@example.test");
+    expect(settingsHtml).toContain("Book ");
 
     const accounts = await request(stub, "/app/accounts", { headers: { cookie } });
     expect(accounts.status).toBe(200);
