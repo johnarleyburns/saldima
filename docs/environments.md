@@ -19,6 +19,17 @@
   (`pnpm e2e`) because hosted runners are unreliable with browser installs.
 - GitHub environment `dev` holds the Cloudflare token and account ID.
 
+### Dev signup tenants
+
+Dev signup creates `<name>-dev.saldima.com`. A proxied wildcard `*` AAAA record
+and the `*.saldima.com/*` Worker route point unknown single-level subdomains at
+`saldima-dev`; the App Worker resolves each hostname through KV and 404s
+unknown ones. Existing custom domains (`stage`, `alice-dev`, etc.) still work.
+
+This wildcard is a **dev-only** arrangement. Before production, replace it with
+the production tenant routing plan; do not assume `*.saldima.com` points to the
+production Worker.
+
 ## Staging
 
 Reserved for release candidates. Do not use it as the day-to-day environment.

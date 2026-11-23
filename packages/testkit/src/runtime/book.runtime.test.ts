@@ -13,6 +13,7 @@ interface BookNamespaceLike {
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     BOOK: BookNamespaceLike;
+    PROVISION_SECRET: string;
   }
 }
 
@@ -38,6 +39,47 @@ async function request(
     }),
   );
 }
+
+describe("Book provisioning in workerd", () => {
+  it("exchanges the provision secret for a one-time setup link", async () => {
+    const stub = env.BOOK.get(env.BOOK.idFromName("tenant-provision-test"));
+    const provision = await stub.fetch(
+      new Request("https://book.internal/internal/provision", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.PROVISION_SECRET}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ email: "provisioned@example.test" }),
+      }),
+    );
+    expect(provision.status).toBe(200);
+    const { token } = (await provision.json()) as { token: string };
+    expect(token).toBeTruthy();
+
+    const page = await request(stub, `/app/setup?token=${encodeURIComponent(token)}`);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("provisioned@example.test");
+    expect(html).not.toContain('id="token"');
+
+    const created = await request(stub, "/app/setup", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token,
+        name: "Provisioned Owner",
+        email: "provisioned@example.test",
+        password: "correct horse battery staple",
+        template: "personal",
+      }),
+    });
+    expect(created.status).toBe(302);
+    await expect(
+      request(stub, `/app/setup?token=${encodeURIComponent(token)}`),
+    ).resolves.toHaveProperty("status", 404);
+  });
+});
 
 describe("Book auth in workerd", () => {
   it("sets up the owner, enrols TOTP, logs in and out", async () => {

@@ -8,3 +8,7 @@ interface ExecLike {
 export function deleteSession(sql: ExecLike, tokenHash: string): void {
   sql.exec("DELETE FROM gcw_sessions WHERE token_hash = ?", tokenHash);
 }
+
+export function deleteSetupToken(sql: ExecLike, tokenHash: string): void {
+  sql.exec("DELETE FROM gcw_setup_tokens WHERE token_hash = ?", tokenHash);
+}

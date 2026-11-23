@@ -16,7 +16,19 @@
   "env": {
     "dev": {
       "name": "saldima-dev",
-      "vars": { "ENVIRONMENT": "dev" },
+      "vars": {
+        "ENVIRONMENT": "dev",
+        "TENANT_DOMAIN": "saldima.com",
+        "TENANT_SUFFIX": "-dev",
+        "APP_ORIGIN": "https://dev.saldima.com",
+        "STRIPE_PUBLISHABLE_KEY": "pk_test_51UewTVDB7RpIiDncX30Wdn66MkGuyhNl3dNZP69HaxneL5P8tLcCjZwDJuGlvg5pDVMitKl5YVJdfeTIt4bIFQbC00pqRDImb5",
+        "STRIPE_PRICE_MONTHLY": "price_1Uf0HWDB7RpIiDncuKOj0OdF",
+        "STRIPE_PRICE_YEARLY": "price_1Uf0IRDB7RpIiDncCrAOpNCb",
+        "SMTP_HOST": "smtp.zoho.com",
+        "SMTP_PORT": "587",
+        "SMTP_USER": "arley@arleyxu.com",
+        "FROM_EMAIL": "arley@arleyxu.com"
+      },
       "workers_dev": false,
       "routes": [
         { "pattern": "dev.saldima.com", "custom_domain": true },
