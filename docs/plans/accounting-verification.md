@@ -23,6 +23,34 @@ journals are rejected. Research and source references:
 5. **Property tests**: fast-check valid-by-construction journals, mutated
    invalid journals, model-based post/void/reverse/reconcile sequences.
 
+## What GnuCash actually tests
+
+From `docs/research/gnucash-business-tests.md` (5.17):
+
+- Engine tests cover transactions/splits, imbalance and `isBalanced`, account
+  balances, invoices/bills/payments/credit notes, lots and scrubbing.
+- Report tests cover the balance sheet/P&L, trial balance closing variants,
+  invoice printing, customer AR aging, GST/VAT and budgets.
+- `test-business.c` is effectively disabled (`#if 0`). There is **no**
+  hypothetical two-year business fixture and no test chaining invoice → payment
+  → aging → statements → close.
+- No GnuCash tests exist for monthly close, depreciation, deferred revenue,
+  partnership capital/basis, AP aging or a Close Book workflow. Retained
+  earnings is a report calculation, not an account.
+- Depreciation, deferred revenue, partnership basis/allocation and monthly close
+  are manual journal workflows; invoices/bills, tax tables, aging reports,
+  budgets and Close Book are built in.
+
+## Two-year partnership scenario
+
+The checked-in research defines a full scenario set: two partners 60/40,
+$100k contributions, equipment and a loan, six-year straight-line depreciation,
+deferred support revenue, AR/AP aging, sales tax, accruals, draws, monthly close
+and two annual closes. Year-end assets/liabilities/partner capital:
+Y1 $174,000 / $36,500 / $137,500; Y2 $250,200 / $30,200 / $220,000.
+January Y1 close: net loss $3,000; assets $119,500; liabilities $22,500;
+equity $97,000; TB $123,000. Scenario IDs are listed in the research file.
+
 ## First five scenarios (verified against GnuCash 5.14)
 
 | #   | Scenario                          | Assets | Liabilities | Retained earnings | Total equity | Revenue | Expenses | Net |
