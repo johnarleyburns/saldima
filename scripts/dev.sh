@@ -2,4 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+if [ ! -f .dev.vars ]; then
+    cp .dev.vars.example .dev.vars
+    echo "dev: created .dev.vars from .dev.vars.example (local only)"
+fi
+
 exec pnpm exec wrangler dev --ip :: "$@"
