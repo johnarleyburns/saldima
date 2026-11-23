@@ -54,7 +54,11 @@ function hasNumberLiteralInit(node) {
  */
 export function scanSource(filename, source) {
   const normalized = filename.split("\\").join("/");
-  if (normalized.endsWith(".test.ts") || normalized.endsWith(".test.tsx")) {
+  if (
+    normalized.endsWith(".test.ts") ||
+    normalized.endsWith(".test.tsx") ||
+    normalized.endsWith(".spec.ts")
+  ) {
     return [];
   }
 

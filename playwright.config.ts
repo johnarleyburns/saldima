@@ -8,13 +8,14 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["github"], ["list"]] : "list",
   use: {
-    baseURL: "http://alice.localhost:8787",
+    baseURL: "http://localhost:8789",
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "pnpm dev",
-    url: "http://alice.localhost:8787/health",
-    reuseExistingServer: !process.env.CI,
+    command:
+      "pnpm exec wrangler dev --ip :: --port 8789 --persist-to .wrangler/e2e-state",
+    url: "http://localhost:8789/health",
+    reuseExistingServer: false,
     timeout: 120_000,
   },
   projects: [
