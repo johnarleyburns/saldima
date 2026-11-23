@@ -86,11 +86,15 @@ if [ "$TARGET" = "dev" ] || [ "$TARGET" = "staging" ]; then
         BOB="bob-stage.saldima.com"
     fi
 
-    echo "==> Seeding $TARGET demo tenants"
-    pnpm exec wrangler kv key put --binding KV --env "$TARGET" --remote \
-        "host:$ALICE" "tenant-alice" >/dev/null
-    pnpm exec wrangler kv key put --binding KV --env "$TARGET" --remote \
-        "host:$BOB" "tenant-bob" >/dev/null
+    echo "==> Seeding $TARGET demo tenants (only when absent)"
+    seed_host() {
+        local host="$1" tenant="$2"
+        if [ -z "$(pnpm exec wrangler kv key get --binding KV --env "$TARGET" --remote "host:$host" 2>/dev/null || true)" ]; then
+            pnpm exec wrangler kv key put --binding KV --env "$TARGET" --remote "host:$host" "$tenant" >/dev/null
+        fi
+    }
+    seed_host "$ALICE" "tenant-alice"
+    seed_host "$BOB" "tenant-bob"
 
     echo "==> Smoke-testing $TARGET"
     curl -fsS --max-time 20 "https://$PREFIX.saldima.com/health" | grep -q '"ok":true'
