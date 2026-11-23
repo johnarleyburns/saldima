@@ -85,6 +85,16 @@ defers the full `worker/edge/book` split to P1. Boundary rules still apply:
   objects.
 - `packages/gnucash` is pure: no Cloudflare, Hono, Stripe, network or `fetch`.
 
+## Environments
+
+- **dev** — the working environment. Every merge to `main` deploys it through
+  `deploy-dev.yml` after unit, workerd and Playwright guards. Use it for daily
+  development and demos.
+- **staging** — release candidates only. It mirrors production and is deployed
+  deliberately before a production release.
+- **production** — owner-approved only; never deployed by an agent without an
+  explicit release approval.
+
 ## Product and launch constraints (Go-to-market)
 
 - Positioning: "Your GnuCash books in any browser and on your phone. $5 a

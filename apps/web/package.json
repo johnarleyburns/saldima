@@ -5,6 +5,7 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "dependencies": {
-    "@saldima/gnucash": "workspace:*"
+    "@saldima/gnucash": "workspace:*",
+    "qrcode-generator": "2.0.4"
   }
 }

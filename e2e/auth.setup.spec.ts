@@ -59,6 +59,7 @@ async function fillSetup(
 
 async function enrollTotp(page: Page): Promise<string> {
   await expect(page.getByRole("heading", { name: "Set up two-factor" })).toBeVisible();
+  await expect(page.locator("[data-qr] svg")).toBeVisible();
   const secret = await page.locator("[data-secret]").getAttribute("data-secret");
   expect(secret).toBeTruthy();
   if (!secret) throw new Error("missing TOTP secret");
@@ -91,6 +92,7 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
 
   await fillSetup(page, testInfo, "alice", email);
   await expect(page.getByRole("heading", { name: "Set up two-factor" })).toBeVisible();
+  await expect(page.locator("[data-qr] svg")).toBeVisible();
   const secret = await page.locator("[data-secret]").getAttribute("data-secret");
   expect(secret).toBeTruthy();
   if (!secret) throw new Error("missing TOTP secret");

@@ -47,7 +47,7 @@ describe("Book auth in workerd", () => {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        token: "test-setup-token",
+        token: "local-setup-token",
         name: "Runtime Owner",
         email: "owner@example.test",
         password: "correct horse battery staple",

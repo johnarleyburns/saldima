@@ -23,6 +23,9 @@ importers:
       '@types/node':
         specifier: ^22.10.2
         version: 22.20.5
+      '@types/qrcode-generator':
+        specifier: 1.0.6
+        version: 1.0.6
       '@vitest/coverage-v8':
         specifier: ^4.0.8
         version: 4.1.12(vitest@4.1.12)
@@ -50,6 +53,9 @@ importers:
       '@saldima/gnucash':
         specifier: workspace:*
         version: link:../../packages/gnucash
+      qrcode-generator:
+        specifier: 2.0.4
+        version: 2.0.4
 
   packages/gnucash: {}
 
@@ -716,6 +722,10 @@ packages:
   '@types/node@22.20.5':
     resolution: {integrity: sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA==}
 
+  '@types/qrcode-generator@1.0.6':
+    resolution: {integrity: sha512-XasuPjhHBC4hyOJ/pHaUNTj+tNxA1SyZpXaS/FOUxEVX03D1gFM8UmMKSIs+pPHLAmRZpU6j9KYxvo+lfsvhKw==}
+    deprecated: This is a stub types definition for qrcode-generator (https://github.com/kazuhikoarase/qrcode-generator). qrcode-generator provides its own type definitions, so you don't need @types/qrcode-generator installed!
+
   '@types/yargs-parser@21.0.3':
     resolution: {integrity: sha512-I4q9QU9MQv4oEOz4tAHJtNz1cwuLxn2F3xcc2iV5WdqLPpUnj30aUuxt1mAxYTG+oe8CZMV/+6rU4S4gRDzqtQ==}
 
@@ -1113,6 +1123,9 @@ packages:
 
   pure-rand@8.4.2:
     resolution: {integrity: sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==}
+
+  qrcode-generator@2.0.4:
+    resolution: {integrity: sha512-mZSiP6RnbHl4xL2Ap5HfkjLnmxfKcPWpWe/c+5XxCuetEenqmNFf1FH/ftXPCtFG5/TDobjsjz6sSNL0Sr8Z9g==}
 
   rolldown@1.2.19:
     resolution: {integrity: sha512-QIiV1J9d0pzN4jeeTH4sjPy0AZ6cAy2cG0ExeoE1+U8Rvj+hR3gYkokx0YbeUNGlZqiQJJ2utcETe0oKXwzsuA==}
@@ -1775,6 +1788,10 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
+  '@types/qrcode-generator@1.0.6':
+    dependencies:
+      qrcode-generator: 2.0.4
+
   '@types/yargs-parser@21.0.3': {}
 
   '@types/yargs@17.0.24':
@@ -2157,6 +2174,8 @@ snapshots:
       source-map-js: 1.2.4
 
   pure-rand@8.4.2: {}
+
+  qrcode-generator@2.0.4: {}
 
   rolldown@1.2.19:
     dependencies:
