@@ -12,12 +12,9 @@ track lives in `johnarleyburns/saldima-ios` and consumes golden vectors and the
 
 ## Source of truth
 
-1. The Saldima spec (Spec tab: Coding-agent handoff, License, Local development,
-   iPhone app; then Design tab). Local copies: `~/Downloads/Spec.md` and
-   `~/Downloads/Design (HLD + LLD).md`; ask for a fresh export if either is
-   missing.
-2. The Go-to-market doc (`~/Downloads/Go-to-market.md`) for positioning and
-   launch constraints.
+1. `docs/spec/SPEC.md` and `docs/spec/DESIGN.md` (the checked-in Spec and
+   Design tabs). Ask for a fresh export if a tab changes.
+2. `docs/spec/GO-TO-MARKET.md` for positioning and launch constraints.
 3. This file.
 4. `docs/plans/P0.md` and the phase plans in `docs/plans/`.
 5. The GitHub issue being worked. Its acceptance criteria are the definition of

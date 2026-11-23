@@ -13,6 +13,7 @@ with or endorsed by the GnuCash project.
 Phase **P0 (Foundations)**. The web track lives here; the iPhone track lives in
 [`johnarleyburns/saldima-ios`](https://github.com/johnarleyburns/saldima-ios).
 
+- Checked-in spec, design and go-to-market: [`docs/spec/`](docs/spec/)
 - Agent contract and stack: [`CLAUDE.md`](CLAUDE.md)
 - P0 checklist and exit criteria: [`docs/plans/P0.md`](docs/plans/P0.md)
 - Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CLA.md`](CLA.md)
