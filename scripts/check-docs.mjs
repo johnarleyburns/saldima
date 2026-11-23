@@ -16,6 +16,7 @@ const REQUIRED = [
   "docs/plans/accounting-verification.md",
   "docs/research/gnucash-verification.md",
   "docs/research/gnucash-business-tests.md",
+  "docs/research/gaap-sources.md",
   "docs/integrations/stripe-and-email.md",
   "docs/spec/SPEC.md",
   "docs/spec/DESIGN.md",

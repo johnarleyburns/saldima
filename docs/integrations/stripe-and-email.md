@@ -2,44 +2,80 @@
 
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-P1 needs Stripe **test mode** for signup and a transactional email provider for
-the welcome/one-time sign-in link. Neither is needed for the local auth slice;
-these are the values to provide when signup starts.
+P1 needs Stripe **test mode** for signup and transactional email for the
+welcome/one-time sign-in link. Neither is used by the current auth slice.
 
-## Stripe test mode
+## Stripe: step by step
 
-1. In the Stripe dashboard toggle **Test mode**.
-2. Create one product, `Saldima`, with two recurring prices:
-   - `$5 / month` → copy the price ID (`price_...`)
-   - `$50 / year` → copy the price ID (`price_...`)
-3. Copy the **test** secret key (`sk_test_...`) and publishable key (`pk_test_...`).
-4. Add a webhook endpoint for each hosted environment:
-   - `https://dev.saldima.com/stripe/webhook`
-   - `https://stage.saldima.com/stripe/webhook`
-     Events: `checkout.session.completed`, `invoice.paid`,
-     `invoice.payment_failed`, `customer.subscription.deleted`.
-     Copy each signing secret (`whsec_...`).
-5. For local development use the Stripe CLI:
+### Are you in a Sandbox?
 
-   ```sh
-   stripe login
-   stripe listen --forward-to localhost:8787/stripe/webhook
-   ```
+Stripe has two ways to get test data:
 
-   It prints a local `whsec_...`; put it in `.dev.vars` as
-   `STRIPE_WEBHOOK_SECRET`.
+- **Test mode** on a normal account: the **Test mode** toggle at the top right of
+  the Dashboard. Test and live data are separate.
+- **Sandboxes** (the newer left-nav item): an isolated test account. If you are
+  inside a sandbox, you are already in test mode; no extra toggle is needed.
 
-### Store the values
+Both issue keys beginning `sk_test_` / `pk_test_`. Never use `sk_live_`.
+
+### 1. Create the product and prices (in test mode/sandbox)
+
+Product catalog → **Add product**:
+
+- Name: `Saldima`
+- Two recurring prices: `$5.00 / month` and `$50.00 / year`
+
+Copy each price ID (`price_...`). Test-mode prices only work with test keys.
+
+### 2. Copy API keys
+
+Developers → **API keys** (test mode):
+
+- Secret key: `sk_test_...`
+- Publishable key: `pk_test_...`
+
+### 3. Redirect URLs
+
+Do **not** use `billing.stripe.com` as the redirect. That host is Stripe's
+hosted page; Checkout sends the customer back to **our** URL after payment.
+No Stripe custom domain is needed.
+
+In the Checkout Session request set:
+
+```text
+success_url = https://dev.saldima.com/app/billing/success?session_id={CHECKOUT_SESSION_ID}
+cancel_url  = https://dev.saldima.com/app/billing/cancel
+```
+
+`{CHECKOUT_SESSION_ID}` is a literal Stripe placeholder (do not URL-encode the
+braces). For local development use `http://localhost:8787/...`. The URLs must
+be absolute; HTTPS is required outside localhost.
+
+### 4. Webhook
+
+Developers → **Webhooks** → **Add endpoint**:
+
+- Endpoint: `https://dev.saldima.com/stripe/webhook`
+- Events:
+  - `checkout.session.completed`
+  - `invoice.paid`
+  - `invoice.payment_failed`
+  - `customer.subscription.deleted`
+
+Copy the endpoint signing secret (`whsec_...`). Add a second endpoint for
+`https://stage.saldima.com/stripe/webhook` when staging is cut.
+
+### 5. Store values
 
 Never commit them. Worker secrets per environment:
 
 ```sh
 printf '%s' 'sk_test_...' | pnpm exec wrangler secret put STRIPE_SECRET_KEY --env dev
 printf '%s' 'whsec_...'   | pnpm exec wrangler secret put STRIPE_WEBHOOK_SECRET --env dev
-# repeat with --env staging when a release candidate is prepared
+# repeat with --env staging for a release candidate
 ```
 
-Non-secret values go in the environment's `vars` in `wrangler.jsonc`:
+Non-secret values in that environment’s `vars` in `wrangler.jsonc`:
 
 | Variable                 | Value         |
 | ------------------------ | ------------- |
@@ -47,45 +83,65 @@ Non-secret values go in the environment's `vars` in `wrangler.jsonc`:
 | `STRIPE_PRICE_MONTHLY`   | `price_...`   |
 | `STRIPE_PRICE_YEARLY`    | `price_...`   |
 
-Test cards: `4242 4242 4242 4242`, any future expiry, any CVC; 3-D Secure:
-`4000 0025 0000 3155`. Use Stripe test clocks for renewal/refund tests.
+### 6. Local webhook forwarding
 
-## Email provider
+```sh
+stripe login
+stripe listen --forward-to localhost:8787/stripe/webhook
+```
 
-Recommendation: **Resend** (HTTP API, 3,000 messages/month free, simple domain
-verification, no SDK needed — we call it through the existing `FetchPort`).
-Alternatives: Postmark (excellent deliverability, paid) or Amazon SES.
-Cloudflare Email Routing is **inbound only**; Cloudflare Email Sending requires
-the Workers Paid plan and domain onboarding.
+Copy the printed local `whsec_...` into `.dev.vars` as
+`STRIPE_WEBHOOK_SECRET`.
 
-What is needed:
+### 7. Test payments
 
-1. A Resend account and API key (`re_...`).
-2. A verified sending domain `saldima.com` in Resend. Add the SPF/DKIM records
-   Resend shows to Cloudflare DNS; add a DMARC record
-   (`v=DMARC1; p=none; rua=mailto:dmarc@saldima.com`) before launch.
-3. `EMAIL_FROM=Saldima <no-reply@saldima.com>` and
-   `EMAIL_REPLY_TO=support@saldima.com` (non-secret vars).
-4. The API key as a Worker secret:
+- Success: `4242 4242 4242 4242`, any future expiry, any CVC.
+- 3-D Secure: `4000 0025 0000 3155`.
+- Decline: `4000 0000 0000 0002`.
+- Use Stripe **test clocks** for renewal, dunning and refund timing.
 
-   ```sh
-   printf '%s' 're_...' | pnpm exec wrangler secret put RESEND_API_KEY --env dev
-   ```
+## Email: reuse the existing Zoho SMTP sender
 
-Local tests do **not** call Resend: the `EmailPort` fake records messages. A
-contract test can run nightly against Resend with a dedicated test key.
+Use the same outbound path as `fast-insurance-portal/website-form-worker`:
+Zoho Mail SMTP over Cloudflare’s outbound TCP socket API
+(`smtp.zoho.com:587`, STARTTLS + AUTH LOGIN). This keeps SPF/DKIM/DMARC valid
+and avoids a new provider.
 
-The first emails to implement are the welcome/one-time sign-in link (15-minute
-expiry) and the renewal reminder. Receipts inbound via
-`receipts@<book>.saldima.com` are P3+.
+For now, authenticate as the existing mailbox `arley@arleyxu.com` and send from
+that address. To send as `@saldima.com`, add the domain/mailbox in Zoho and
+verify its SPF/DKIM first; do not spoof it.
+
+### Values and secrets
+
+Non-secret vars (dev environment):
+
+| Variable     | Value                                                            |
+| ------------ | ---------------------------------------------------------------- |
+| `SMTP_HOST`  | `smtp.zoho.com`                                                  |
+| `SMTP_PORT`  | `587`                                                            |
+| `SMTP_USER`  | `arley@arleyxu.com`                                              |
+| `FROM_EMAIL` | `arley@arleyxu.com` (must match the authenticated mailbox/alias) |
+| `TO_EMAIL`   | `arley@arleyxu.com`                                              |
+| `CC_EMAIL`   | `audrey@arleyxu.com`                                             |
+
+Secret:
+
+```sh
+printf '%s' "$(tr -d ' \t\r\n' < ~/.zoho-app-password)" \
+  | pnpm exec wrangler secret put SMTP_PASS --env dev
+```
+
+The existing app password in `~/.zoho-app-password` is the Zoho app password
+used by the website form worker. Do not commit it.
+
+The Saldima `EmailPort` implementation should call `connect()` and SMTP exactly
+like the form worker, behind the injected port. Unit tests use `FakeEmail`;
+a nightly contract test may send one message through Zoho.
 
 ## What to hand over
 
-- Stripe test secret key, publishable key, monthly/yearly price IDs and the
-  webhook signing secret (or set them with the commands above).
-- The email provider choice; if Resend, the API key and confirmation that
-  `saldima.com` is verified.
-- A decision on the From/Reply-To addresses.
-
-Do not paste keys into a PR, issue or chat. Put them directly into Wrangler
-secrets or a gitignored file the deployment script reads.
+- Stripe test secret/publishable keys, price IDs and webhook secret (or set the
+  secrets above).
+- Confirmation of the From address for Saldima email; the existing Zoho app
+  password is already available locally.
+- No keys in chat, issues or PRs.
