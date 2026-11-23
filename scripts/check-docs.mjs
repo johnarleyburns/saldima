@@ -13,6 +13,8 @@ const REQUIRED = [
   "docs/plans/P0.md",
   "docs/plans/P1.md",
   "docs/environments.md",
+  "docs/plans/accounting-verification.md",
+  "docs/research/gnucash-verification.md",
   "docs/spec/SPEC.md",
   "docs/spec/DESIGN.md",
   "docs/spec/GO-TO-MARKET.md",
