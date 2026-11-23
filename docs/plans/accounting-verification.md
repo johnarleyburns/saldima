@@ -48,7 +48,8 @@ journals are rejected. Research and source references:
 
 - **Rounding decision:** posting normalisation is half-up (`toScu` /
   `roundToFractionHalfUp`), matching GnuCash; report display keeps half-even.
-  The 2.665 → 2.67 case is in the ledger tests.
+  `parseMoneyHalfUp` keeps the exact decimal until posting normalises it.
+  The 2.665 → 2.67 case is in the money and ledger tests.
 - **Report HTML is not an API.** Pin the oracle image and fail loudly on
   layout/version drift; parse by `acct-guid`, not names.
 - **Locale/timezone:** force `TZ=UTC`, `LC_ALL=C`, isolated `HOME`/`XDG_*`.
