@@ -34,7 +34,21 @@ Developers → **API keys** (test mode):
 - Secret key: `sk_test_...`
 - Publishable key: `pk_test_...`
 
-### 3. Redirect URLs
+### 3. Redirect URLs — they are code parameters, not Dashboard settings
+
+**There is no success/cancel URL field in Stripe account settings.** For a
+Checkout Session created by our API, Stripe takes `success_url` and `cancel_url`
+as parameters on `checkout.sessions.create`. The Dashboard will not show them.
+
+If you are looking at:
+
+- **Business information → Redirect link**: that is onboarding/OAuth metadata,
+  not Checkout. Ignore it.
+- **Payment Links → After payment → Confirmation page**: Payment Links do have a
+  redirect field. We are not using Payment Links; we create Checkout Sessions
+  from the Worker.
+- **Settings → Billing → Customer portal → Return URL**: that is the Billing
+  Portal, used later for managing an existing subscription, not signup.
 
 Do **not** use `billing.stripe.com` as the redirect. That host is Stripe's
 hosted page; Checkout sends the customer back to **our** URL after payment.
@@ -50,6 +64,21 @@ cancel_url  = https://dev.saldima.com/app/billing/cancel
 `{CHECKOUT_SESSION_ID}` is a literal Stripe placeholder (do not URL-encode the
 braces). For local development use `http://localhost:8787/...`. The URLs must
 be absolute; HTTPS is required outside localhost.
+
+The Worker call looks like this (the exact Stripe SDK/HTTP shape is an
+implementation detail; the URLs are the contract):
+
+```ts
+const session = await stripe.checkout.sessions.create({
+  mode: "subscription",
+  line_items: [{ price: env.STRIPE_PRICE_YEARLY, quantity: 1 }],
+  success_url:
+    "https://dev.saldima.com/app/billing/success?session_id={CHECKOUT_SESSION_ID}",
+  cancel_url: "https://dev.saldima.com/app/billing/cancel",
+  customer_email: email,
+});
+// redirect the browser to session.url
+```
 
 ### 4. Webhook
 
