@@ -154,8 +154,9 @@ export async function sendSmtpEmail(
     { secureTransport: "starttls" },
   );
   let channel: Channel | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error("SMTP timeout")), timeoutMs);
+    timer = setTimeout(() => reject(new Error("SMTP timeout")), timeoutMs);
   });
   try {
     await Promise.race([socket.opened, timeout]);
@@ -186,6 +187,7 @@ export async function sendSmtpEmail(
     expectCode(await channel.reply(), [250], "message body");
     await channel.write("QUIT\r\n");
   } finally {
+    if (timer) clearTimeout(timer);
     if (channel) await channel.close();
     else {
       try {
