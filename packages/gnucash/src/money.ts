@@ -89,6 +89,22 @@ export function roundToFraction(value: Money, fraction: bigint): Money {
   return { num: rounded, denom: fraction };
 }
 
+/**
+ * GnuCash posting normalisation: round half away from zero (half-up).
+ * Use this for split value/amount normalisation; `roundToFraction` remains
+ * half-to-even for report display and price work.
+ */
+export function roundToFractionHalfUp(value: Money, fraction: bigint): Money {
+  if (fraction <= 0n) throw new RangeError("fraction must be positive");
+  const scaled = value.num * fraction;
+  const quotient = scaled / value.denom;
+  const remainder = scaled % value.denom;
+  const twiceRemainder = abs(remainder) * 2n;
+  const sign = remainder < 0n ? -1n : 1n;
+  const rounded = twiceRemainder >= value.denom ? quotient + sign : quotient;
+  return { num: rounded, denom: fraction };
+}
+
 export function decimalPlaces(fraction: bigint): number {
   if (fraction <= 0n) throw new RangeError("fraction must be positive");
   let remaining = fraction;

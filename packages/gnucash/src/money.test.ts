@@ -12,6 +12,7 @@ import {
   normalizeMoney,
   parseMoney,
   roundToFraction,
+  roundToFractionHalfUp,
   subtractMoney,
 } from "./money.ts";
 
@@ -74,6 +75,20 @@ describe("Money: GnuCash half-even rounding", () => {
 
   it("rejects a non-positive fraction", () => {
     expect(() => roundToFraction(cents(1n), 0n)).toThrow(RangeError);
+  });
+
+  it("posting normalisation is half-up, unlike report half-even", () => {
+    const value = money(2665n, 1000n);
+    expect(roundToFractionHalfUp(value, 100n)).toEqual({ num: 267n, denom: 100n });
+    expect(roundToFraction(value, 100n)).toEqual({ num: 266n, denom: 100n });
+    expect(roundToFractionHalfUp(money(-2665n, 1000n), 100n)).toEqual({
+      num: -267n,
+      denom: 100n,
+    });
+    expect(roundToFractionHalfUp(money(2675n, 1000n), 100n)).toEqual({
+      num: 268n,
+      denom: 100n,
+    });
   });
 });
 

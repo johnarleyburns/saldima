@@ -106,6 +106,22 @@ describe("journal posting", () => {
     ).toThrow(LedgerError);
   });
 
+  it("normalises split values half-up when posting, like GnuCash", () => {
+    const base = createLedger(accounts);
+    const ledger = post(base, {
+      id: guidFrom("e".repeat(32)),
+      date: "2025-01-01",
+      description: "Half-up posting",
+      fraction: 100n,
+      splits: [
+        { accountId: bank, value: money(2665n, 1000n) },
+        { accountId: opening, value: money(-2665n, 1000n) },
+      ],
+    });
+    expect(ledger.transactions[0]?.splits[0]?.value).toEqual(money(267n, 100n));
+    expect(ledger.transactions[0]?.splits[1]?.value).toEqual(money(-267n, 100n));
+  });
+
   it("honours as-of and period dates", () => {
     let ledger = openingLedger();
     ledger = post(

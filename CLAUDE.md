@@ -125,7 +125,6 @@ defers the full `worker/edge/book` split to P1. Boundary rules still apply:
 | `pnpm test:runtime`      | Vitest in workerd with real DO/KV/R2 bindings                                |
 | `pnpm test:coverage`     | unit + runtime coverage; CI requires >= 90% lines on `packages/*`            |
 | `pnpm e2e`               | Playwright against the local stack (`--ui` for UI mode)                      |
-| `pnpm e2e:ci`            | headless Playwright across iPhone, Android and desktop projects              |
 | `pnpm vectors`           | regenerate `fixtures/vectors/*.json` deterministically                       |
 | `pnpm check:licenses`    | dependency license scan (GPL/AGPL/unknown fail)                              |
 | `pnpm check:spdx`        | every tracked source file has an SPDX header                                 |
@@ -151,7 +150,9 @@ protected GitHub Environments.
 - Tests never sleep, poll or read wall time. Use the manual clock and scheduler;
   script races step by step (two uploads, write during merge, alarm during
   import).
-- Mix target: ~80% unit with fakes, 15% workerd runtime, 5% Playwright journeys.
+- Mix target: unit with fakes and workerd runtime in hosted CI; Playwright
+  journeys run locally only (`pnpm e2e`). Do not add browser installs to
+  hosted workflows.
 - For platform behaviour that cannot be automated, document the limitation in
   the PR and add the narrowest repeatable check plus a manual verification step.
 

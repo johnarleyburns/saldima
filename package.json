@@ -27,7 +27,6 @@
     "dev": "./scripts/dev.sh",
     "reset": "node scripts/reset.mjs",
     "e2e": "./scripts/e2e.sh",
-    "e2e:ci": "./scripts/e2e.sh",
     "deploy:local": "./scripts/deploy.sh local",
     "deploy:staging": "./scripts/deploy.sh staging",
     "deploy:production": "./scripts/deploy.sh production",
