@@ -11,6 +11,10 @@ const REQUIRED = [
   "NOTICE",
   "CODEOWNERS",
   "docs/plans/P0.md",
+  "docs/plans/P1.md",
+  "docs/spec/SPEC.md",
+  "docs/spec/DESIGN.md",
+  "docs/spec/GO-TO-MARKET.md",
 ];
 
 const errors = [];
