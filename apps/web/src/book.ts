@@ -22,6 +22,7 @@ import {
   verifyTotp,
 } from "./auth.ts";
 import { deleteSession } from "./data-access/auth-store.ts";
+import { totpQrSvg } from "./qr.ts";
 import { epochMs, isoAfterSeconds, nowIso } from "./time/system-clock.ts";
 
 export interface BookEnv {
@@ -89,6 +90,8 @@ button { min-height: 44px; margin-top: 1.25rem; width: 100%; font: inherit; font
 .error { padding: 0.75rem; border-radius: 0.5rem; background: #7f1d1d; color: white; }
 .muted { color: GrayText; font-size: 0.9rem; }
 code { display: block; overflow-wrap: anywhere; padding: 0.75rem; background: Field; border: 1px solid GrayText; border-radius: 0.5rem; }
+.qr { max-width: 15rem; margin: 1rem auto; padding: 0.75rem; background: white; border-radius: 0.75rem; }
+.qr svg { display: block; width: 100%; height: auto; }
 nav a { color: inherit; }
 </style>
 </head>
@@ -400,9 +403,11 @@ ${tokenField}
         );
       }
       const user = this.userById(session.user_id);
-      setupBlock = `<p>Add this secret to your authenticator app:</p>
-<code data-secret="${escapeHtml(secret)}">${escapeHtml(secret)}</code>
-<p class="muted"><a href="${escapeHtml(totpUri(secret, user?.email ?? "owner"))}">Open in authenticator</a></p>`;
+      const uri = totpUri(secret, user?.email ?? "owner");
+      setupBlock = `<p>Scan this with your authenticator app:</p>
+<div class="qr" data-qr>${totpQrSvg(uri)}</div>
+<details><summary>Can't scan? Show the secret</summary><code data-secret="${escapeHtml(secret)}">${escapeHtml(secret)}</code></details>
+<p class="muted"><a href="${escapeHtml(uri)}">Open in authenticator</a></p>`;
     }
 
     return c.html(
