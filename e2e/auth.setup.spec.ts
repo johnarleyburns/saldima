@@ -48,9 +48,11 @@ async function fillSetup(
   book: string,
   email: string,
   token = SETUP_TOKEN,
+  template?: string,
 ): Promise<void> {
   await page.goto(bookUrl(book, testInfo, "/app/setup"));
   await page.getByLabel("Setup token").fill(token);
+  if (template) await page.getByLabel("Chart of accounts").selectOption(template);
   await page.getByLabel("Name").fill(`Owner ${book}`);
   await page.getByLabel("Email").fill(email);
   await page.getByLabel(/^Password/).fill(PASSWORD);
@@ -90,7 +92,7 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   await fillSetup(page, testInfo, "alice", email, "wrong-token");
   await expect(page.getByText(/setup token is incorrect/i)).toBeVisible();
 
-  await fillSetup(page, testInfo, "alice", email);
+  await fillSetup(page, testInfo, "alice", email, SETUP_TOKEN, "insurance-agency");
   await expect(page.getByRole("heading", { name: "Set up two-factor" })).toBeVisible();
   await expect(page.locator("[data-qr] svg")).toBeVisible();
   const secret = await page.locator("[data-secret]").getAttribute("data-secret");
@@ -100,6 +102,15 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   await page.getByRole("button", { name: "Enable two-factor" }).click();
   await expect(page.getByText(email)).toBeVisible();
 
+  await page.getByRole("link", { name: /Chart of accounts/ }).click();
+  await expect(page.getByText("Premium Trust")).toBeVisible();
+  await page.getByRole("link", { name: "Add account" }).click();
+  await page.getByLabel("Name").fill("Petty Cash");
+  await page.getByLabel("Type").selectOption("BANK");
+  await page.getByRole("button", { name: "Add account" }).click();
+  await expect(page.getByText("Petty Cash")).toBeVisible();
+
+  await page.getByRole("link", { name: "Back" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 
