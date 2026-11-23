@@ -36,6 +36,7 @@ Deployments use the same script:
 ```sh
 pnpm deploy:staging     # stage.saldima.com
 pnpm deploy:production  # owner approval required: -- --yes
+pnpm e2e                # Playwright setup/login journey on an isolated local state
 ```
 
 ## Licence
