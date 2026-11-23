@@ -24,6 +24,7 @@ Requires Node 22+ and pnpm 11+.
 
 ```sh
 pnpm install
+cp .dev.vars.example .dev.vars   # local-only master key and setup token
 pnpm typecheck
 pnpm lint
 pnpm test:unit
