@@ -38,12 +38,16 @@ Everything else in the accounting surface must match the web to the cent.
 
 ## Parity gate (must be true before the next phase)
 
-- [ ] iOS/Android create a book from all three templates and reopen it.
-- [ ] Account create/edit/move/hide/delete behaves like the web, including
+- [x] iOS creates a book from all three templates and reopens it; GnuCash 5.14
+      opens and re-saves the file.
+- [ ] Android does the same (blocked on the Play Console account; core work can
+      start at any time).
+- [x] iOS account create/edit/move/hide/delete behaves like the web, including
       refusing a move into the account's own subtree and refusing to delete an
       account that has children.
-- [ ] `verifyLedger` exists on both mobile cores with the same findings as
-      `packages/gnucash/src/ledger.ts`.
+- [ ] Android account editing reaches the same rules.
+- [x] `verifyLedger` exists on iOS with the same findings as the web; Android
+      still needs it.
 - [ ] Reports UI renders trial balance, balance sheet and P&L from the open
       book, using half-even display.
 - [ ] Web and mobile import the same vector fixtures.
