@@ -5,7 +5,7 @@ Audit date: 2026-11-23. Sources: `apps/web/src/app.ts`,
 `apps/web/src/book.ts`, `packages/gnucash/src/`, `saldima-ios/Saldima*`,
 `saldima-android/core|app`.
 
-The mobile apps are **standalone books**. They are deliberately *not* hosted
+The mobile apps are **standalone books**. They are deliberately _not_ hosted
 clients: no sign-up, no login, no multi-tenant routing, no subscription. A
 hosted account is optional and removable; the local `.gnucash` file is the
 source of truth. The only purchase on mobile is the one-time Supporter
@@ -15,26 +15,26 @@ Everything else in the accounting surface must match the web to the cent.
 
 ## Matrix
 
-| Capability | Web | iOS | Android | Verdict |
-| --- | --- | --- | --- | --- |
-| Hosted sign-up, Stripe Checkout, provisioning, welcome email | yes | — | — | Web-only by design |
-| Owner setup, password, TOTP, sessions | yes | — | — | Web-only by design (device-local app) |
-| Tenant routing (`alice-dev.saldima.com`) | yes | — | — | Web-only by design |
-| Open an existing `.gnucash` SQLite book | — (server workspace) | read-only account tree | — | iOS ahead |
-| Create a book from a template | yes (at setup) | **missing** | **missing** | Gap |
-| Account tree display | yes | **placeholder** | **placeholder** | Gap |
-| Account create/edit/move/hide/placeholder/delete | yes | **missing** | **missing** | Gap |
-| Exact money, half-up posting, half-even display | yes | yes | yes | In sync |
-| Journal posting validation (balance, duplicates, dates) | yes | yes | yes | In sync |
-| Trial balance, balance sheet, P&L, retained earnings | yes | yes | yes | In sync |
-| `verifyLedger` invariant report | yes | **missing** | **missing** | Gap |
-| Reports UI | — | — | — | Neither track; planned |
-| Register / transaction entry UI | — | — | — | Neither track; planned |
-| Receipts capture/attach | — | placeholder tab | placeholder tab | Neither track |
-| Theme / appearance setting | colour scheme cookie | system appearance | system appearance | Equivalent |
-| One-time Supporter purchase | — (subscription) | StoreKit consumable | Play consumable | Mobile-only by design |
-| Optional `/api/v1` sync, leases, merge | planned | contract stub | contract stub | Neither track |
-| Golden vectors as the numeric contract | source of truth | replays | replays | In sync |
+| Capability                                                   | Web                  | iOS                    | Android           | Verdict                               |
+| ------------------------------------------------------------ | -------------------- | ---------------------- | ----------------- | ------------------------------------- |
+| Hosted sign-up, Stripe Checkout, provisioning, welcome email | yes                  | —                      | —                 | Web-only by design                    |
+| Owner setup, password, TOTP, sessions                        | yes                  | —                      | —                 | Web-only by design (device-local app) |
+| Tenant routing (`alice-dev.saldima.com`)                     | yes                  | —                      | —                 | Web-only by design                    |
+| Open an existing `.gnucash` SQLite book                      | — (server workspace) | read-only account tree | —                 | iOS ahead                             |
+| Create a book from a template                                | yes (at setup)       | **missing**            | **missing**       | Gap                                   |
+| Account tree display                                         | yes                  | **placeholder**        | **placeholder**   | Gap                                   |
+| Account create/edit/move/hide/placeholder/delete             | yes                  | **missing**            | **missing**       | Gap                                   |
+| Exact money, half-up posting, half-even display              | yes                  | yes                    | yes               | In sync                               |
+| Journal posting validation (balance, duplicates, dates)      | yes                  | yes                    | yes               | In sync                               |
+| Trial balance, balance sheet, P&L, retained earnings         | yes                  | yes                    | yes               | In sync                               |
+| `verifyLedger` invariant report                              | yes                  | **missing**            | **missing**       | Gap                                   |
+| Reports UI                                                   | —                    | —                      | —                 | Neither track; planned                |
+| Register / transaction entry UI                              | —                    | —                      | —                 | Neither track; planned                |
+| Receipts capture/attach                                      | —                    | placeholder tab        | placeholder tab   | Neither track                         |
+| Theme / appearance setting                                   | colour scheme cookie | system appearance      | system appearance | Equivalent                            |
+| One-time Supporter purchase                                  | — (subscription)     | StoreKit consumable    | Play consumable   | Mobile-only by design                 |
+| Optional `/api/v1` sync, leases, merge                       | planned              | contract stub          | contract stub     | Neither track                         |
+| Golden vectors as the numeric contract                       | source of truth      | replays                | replays           | In sync                               |
 
 ## Parity gate (must be true before the next phase)
 
