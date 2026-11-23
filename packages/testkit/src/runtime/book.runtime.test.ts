@@ -91,7 +91,49 @@ describe("Book auth in workerd", () => {
     });
     expect(created.status).toBe(302);
     const afterCreate = await request(stub, "/app/accounts", { headers: { cookie } });
-    expect(await afterCreate.text()).toContain("Petty Cash");
+    const createdHtml = await afterCreate.text();
+    expect(createdHtml).toContain("Petty Cash");
+    const pettyGuid =
+      /data-account-guid="([0-9a-f]{32})" data-account-name="Petty Cash"/.exec(
+        createdHtml,
+      )?.[1];
+    expect(pettyGuid).toBeTruthy();
+    if (!pettyGuid) throw new Error("missing account GUID");
+
+    const editPage = await request(stub, `/app/accounts/${pettyGuid}/edit`, {
+      headers: { cookie },
+    });
+    expect(editPage.status).toBe(200);
+
+    const updated = await request(stub, `/app/accounts/${pettyGuid}`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        name: "Petty Cash Box",
+        type: "BANK",
+        parent: "",
+        code: "1010",
+        description: "Cash box",
+        hidden: "on",
+      }),
+    });
+    expect(updated.status).toBe(302);
+    const updatedHtml = await (
+      await request(stub, "/app/accounts", { headers: { cookie } })
+    ).text();
+    expect(updatedHtml).toContain("Petty Cash Box");
+    expect(updatedHtml).toContain("hidden");
+
+    const deleted = await request(stub, `/app/accounts/${pettyGuid}/delete`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({}),
+    });
+    expect(deleted.status).toBe(302);
+    const deletedHtml = await (
+      await request(stub, "/app/accounts", { headers: { cookie } })
+    ).text();
+    expect(deletedHtml).not.toContain("Petty Cash Box");
 
     const closed = await request(stub, "/app/setup");
     expect(closed.status).toBe(404);

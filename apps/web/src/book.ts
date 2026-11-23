@@ -21,6 +21,7 @@ import {
   verifyPassword,
   verifyTotp,
 } from "./auth.ts";
+import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession } from "./data-access/auth-store.ts";
 import { totpQrSvg } from "./qr.ts";
 import {
@@ -114,6 +115,7 @@ button { min-height: 44px; margin-top: 1.25rem; width: 100%; font: inherit; font
 code { display: block; overflow-wrap: anywhere; padding: 0.75rem; background: Field; border: 1px solid GrayText; border-radius: 0.5rem; }
 .qr { max-width: 15rem; margin: 1rem auto; padding: 0.75rem; background: white; border-radius: 0.75rem; }
 .qr svg { display: block; width: 100%; height: auto; }
+.danger { background: #991b1b; }
 nav a { color: inherit; }
 </style>
 </head>
@@ -222,6 +224,11 @@ export class Book {
     app.get("/app/accounts", (c) => this.accountsPage(c));
     app.get("/app/accounts/new", (c) => this.newAccountPage(c));
     app.post("/app/accounts", (c) => this.createAccount(c));
+    app.get("/app/accounts/:guid/edit", (c) =>
+      this.editAccountPage(c, c.req.param("guid") ?? ""),
+    );
+    app.post("/app/accounts/:guid", (c) => this.updateAccount(c));
+    app.post("/app/accounts/:guid/delete", (c) => this.deleteAccount(c));
     app.get("/app/security/totp", (c) => this.totpPage(c));
     app.post("/app/security/totp", (c) => this.totp(c));
     return app;
@@ -576,8 +583,8 @@ ${setupBlock}
         ]
           .filter(Boolean)
           .join(" · ");
-        return `<li data-account-name="${escapeHtml(node.name)}">
-<strong>${escapeHtml(node.name)}</strong>
+        return `<li data-account-guid="${escapeHtml(node.guid)}" data-account-name="${escapeHtml(node.name)}">
+<a href="/app/accounts/${escapeHtml(node.guid)}/edit"><strong>${escapeHtml(node.name)}</strong></a>
 <span class="muted">${escapeHtml(node.account_type)}${flags ? ` · ${flags}` : ""}</span>
 ${this.renderAccountTree(node.children, depth + 1)}
 </li>`;
@@ -586,15 +593,165 @@ ${this.renderAccountTree(node.children, depth + 1)}
     return `<ul class="accounts">${items}</ul>`;
   }
 
-  private accountOptions(): string {
+  private accountOptions(
+    exclude: ReadonlySet<string> = new Set(),
+    selected = "",
+  ): string {
     const visit = (nodes: AccountNode[], depth: number): string =>
       nodes
         .map((node) => {
+          if (exclude.has(node.guid)) return "";
           const label = `${"  ".repeat(depth)}${node.name} (${node.account_type})`;
-          return `<option value="${escapeHtml(node.guid)}">${escapeHtml(label)}</option>${visit(node.children, depth + 1)}`;
+          const chosen = node.guid === selected ? " selected" : "";
+          return `<option value="${escapeHtml(node.guid)}"${chosen}>${escapeHtml(label)}</option>${visit(node.children, depth + 1)}`;
         })
         .join("");
-    return `<option value="">No parent (top level)</option>${visit(this.accountsTree(), 0)}`;
+    return `<option value=""${selected === "" ? " selected" : ""}>No parent (top level)</option>${visit(this.accountsTree(), 0)}`;
+  }
+
+  private accountByGuid(guid: string): AccountRow | null {
+    return (
+      this.rows<AccountRow>(
+        `SELECT guid, name, account_type, parent_guid, code, hidden, placeholder
+         FROM accounts WHERE guid = ? LIMIT 1`,
+        guid,
+      )[0] ?? null
+    );
+  }
+
+  private descendantGuids(guid: string): Set<string> {
+    const rows = this.accountRows();
+    const children = new Map<string, string[]>();
+    for (const row of rows) {
+      if (row.parent_guid) {
+        const list = children.get(row.parent_guid) ?? [];
+        list.push(row.guid);
+        children.set(row.parent_guid, list);
+      }
+    }
+    const found = new Set<string>([guid]);
+    const queue = [guid];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) continue;
+      for (const child of children.get(current) ?? []) {
+        if (found.has(child)) continue;
+        found.add(child);
+        queue.push(child);
+      }
+    }
+    return found;
+  }
+
+  private childCount(guid: string): number {
+    const row = this.rows<{ count: number }>(
+      "SELECT count(*) AS count FROM accounts WHERE parent_guid = ?",
+      guid,
+    )[0];
+    return Number(row?.count ?? 0);
+  }
+
+  private async editAccountPage(
+    c: BookContext,
+    guid: string,
+    error = "",
+  ): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const account = this.accountByGuid(guid);
+    if (!account) return c.text("Account not found", 404);
+    return c.html(
+      page(
+        "Edit account",
+        `<h1>Edit account</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/accounts/${escapeHtml(guid)}">
+<label for="name">Name</label>
+<input id="name" name="name" type="text" required maxlength="200" value="${escapeHtml(account.name)}">
+<label for="type">Type</label>
+<select id="type" name="type">${ACCOUNT_TYPES.map((type) => `<option value="${type}"${type === account.account_type ? " selected" : ""}>${type}</option>`).join("")}</select>
+<label for="parent">Parent</label>
+<select id="parent" name="parent">${this.accountOptions(this.descendantGuids(guid), account.parent_guid ?? "")}</select>
+<label for="code">Code</label>
+<input id="code" name="code" type="text" maxlength="40" value="${escapeHtml(account.code ?? "")}">
+<label for="description">Description</label>
+<textarea id="description" name="description" rows="3"></textarea>
+<label><input type="checkbox" name="hidden"${account.hidden ? " checked" : ""}> Hidden</label>
+<label><input type="checkbox" name="placeholder"${account.placeholder ? " checked" : ""}> Placeholder</label>
+<button type="submit">Save account</button>
+</form>
+<form method="post" action="/app/accounts/${escapeHtml(guid)}/delete">
+<button type="submit" class="danger">Delete account</button>
+</form>
+<p><a href="/app/accounts">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async updateAccount(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const account = guid ? this.accountByGuid(guid) : null;
+    if (!account) return c.text("Account not found", 404);
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    const type = formValue(body, "type");
+    const parent = formValue(body, "parent");
+    if (!name || name.length > 200 || !ACCOUNT_TYPES.includes(type as AccountType)) {
+      return this.editAccountPage(
+        c,
+        guid,
+        "Enter a name and choose a valid account type.",
+      );
+    }
+    if (parent) {
+      if (!this.accountByGuid(parent) || this.descendantGuids(guid).has(parent)) {
+        return this.editAccountPage(
+          c,
+          guid,
+          "Choose a parent that is not this account or one of its children.",
+        );
+      }
+    }
+    this.sql.exec(
+      `UPDATE accounts
+       SET name = ?, account_type = ?, parent_guid = ?, code = ?,
+           description = ?, hidden = ?, placeholder = ?
+       WHERE guid = ?`,
+      name,
+      type,
+      parent || null,
+      formValue(body, "code") || null,
+      formValue(body, "description") || null,
+      body.hidden === "on" ? 1 : 0,
+      body.placeholder === "on" ? 1 : 0,
+      guid,
+    );
+    return c.redirect("/app/accounts");
+  }
+
+  private async deleteAccount(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const account = guid ? this.accountByGuid(guid) : null;
+    if (!account) return c.text("Account not found", 404);
+    if (this.childCount(guid) > 0) {
+      return this.editAccountPage(
+        c,
+        guid,
+        "Move or delete this account's children before deleting it.",
+      );
+    }
+    deleteAccount(this.sql, guid);
+    return c.redirect("/app/accounts");
   }
 
   private async accountsPage(c: BookContext): Promise<Response> {
