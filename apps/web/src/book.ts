@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import {
   addMoney,
+  type BookSnapshot,
   equalsMoney,
   formatMoney,
   type Money,
@@ -932,7 +933,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const file = body.file;
     if (!(file instanceof File)) return this.importPage(c, "Choose a book file.");
     const bytes = new Uint8Array(await file.arrayBuffer());
-    let snapshot;
+    let snapshot: BookSnapshot;
     try {
       snapshot = await readBookSnapshot(bytes);
     } catch {
