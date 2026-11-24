@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /// <reference types="@cloudflare/vitest-plugin/types" />
 import { env } from "cloudflare:test";
+import { writeGnuCashXml } from "@saldima/gnucash";
 import { describe, expect, it } from "vitest";
-
 import { totpCode } from "../../../../apps/web/src/auth.ts";
 
 interface BookNamespaceLike {
@@ -98,6 +98,19 @@ function importId(response: Response): string {
 
 function count(html: string, text: string): number {
   return html.split(text).length - 1;
+}
+
+async function gzipText(text: string): Promise<ArrayBuffer> {
+  const stream = new Blob([new TextEncoder().encode(text)])
+    .stream()
+    .pipeThrough(new CompressionStream("gzip"));
+  return new Response(stream).arrayBuffer();
+}
+
+async function gunzip(response: Response): Promise<string> {
+  const stream = response.body?.pipeThrough(new DecompressionStream("gzip"));
+  if (!stream) throw new Error("missing export body");
+  return new Response(stream).text();
 }
 
 async function setupTenant(stub: {
@@ -271,6 +284,74 @@ describe("bank statement import", () => {
       await request(stub, "/app/journal", { headers: { cookie: otherCookie } })
     ).text();
     expect(otherJournal).toContain("Other only");
+
+    // A .gnucash import with a structural ROOT keeps it out of the tree but
+    // still exports it.
+    const rootBook = await form(stub, "/app/books", cookie, {
+      name: "Root Co",
+      template: "personal",
+      currency: "USD",
+    });
+    expect(rootBook.status).toBe(302);
+    const rootCookie = `${cookie}; ${cookieFrom(rootBook)}`;
+    const rootGuid = "1".repeat(32);
+    const rootXml = writeGnuCashXml({
+      bookGuid: "c".repeat(32),
+      currencyCode: "USD",
+      fraction: 100,
+      accounts: [
+        {
+          guid: rootGuid,
+          name: "Root Account",
+          type: "ROOT",
+          parentGuid: null,
+          commodityCode: null,
+          code: "",
+          description: "",
+        },
+        {
+          guid: "2".repeat(32),
+          name: "Bank",
+          type: "BANK",
+          parentGuid: rootGuid,
+          commodityCode: "USD",
+          code: "",
+          description: "",
+        },
+      ],
+      transactions: [],
+    });
+    const rootUpload = new FormData();
+    rootUpload.set(
+      "file",
+      new File([await gzipText(rootXml)], "root.gnucash", {
+        type: "application/gzip",
+      }),
+    );
+    const importedRoot = await request(stub, "/app/import", {
+      method: "POST",
+      headers: { cookie: rootCookie },
+      body: rootUpload,
+    });
+    expect(importedRoot.status).toBe(302);
+    const rootAccounts = await (
+      await request(stub, "/app/accounts", { headers: { cookie: rootCookie } })
+    ).text();
+    expect(rootAccounts).toContain(">Bank<");
+    expect(rootAccounts).not.toContain("Root Account");
+    const protectedRoot = await form(
+      stub,
+      `/app/accounts/${rootGuid}/delete`,
+      rootCookie,
+      {},
+    );
+    expect(protectedRoot.status).toBe(404);
+    const rootExport = await request(stub, "/app/export/xml", {
+      headers: { cookie: rootCookie },
+    });
+    const exportedXml = await gunzip(rootExport);
+    expect(exportedXml).toContain("Root Account");
+    expect(exportedXml).toContain(">Bank<");
 
     // Cancel drops the staged batch.
     const cancelUpload = await upload(stub, cookie, checking, "bank.qif", QIF);

@@ -34,6 +34,8 @@ describe("SQLite reader", () => {
 
   it("reads the oracle SQLite book", async () => {
     const snapshot = readSqliteSnapshot(new Uint8Array(await readFile(fixture)));
+    expect(snapshot.bookGuid).toBe("529ef4d2cf0a4ebb8f6238f6f2ddcac0");
+    expect(snapshot.templateRootGuid).toBe("18802302696643e9936ee82d7deeef01");
     expect(snapshot.currencyCode).toBe("USD");
     const names = snapshot.accounts
       .filter((account) => account.type !== "ROOT")
@@ -46,6 +48,9 @@ describe("SQLite reader", () => {
     expect(tx.description).toBe("Opening deposit");
     expect(tx.date).toBe("2025-01-15");
     expect(tx.splits).toHaveLength(2);
+    expect(tx.splits.every((split) => /^[0-9a-f]{32}$/.test(split.guid ?? ""))).toBe(
+      true,
+    );
     expect(
       tx.splits.some((split) => equalsMoney(split.value, money(250_000n, 100n))),
     ).toBe(true);

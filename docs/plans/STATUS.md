@@ -20,7 +20,7 @@ iOS: `saldima-ios/docs/plans/P1-MOBILE.md`.
 | Help topics                                         | yes                      | yes                    | yes                     |
 | Multiple companies                                  | yes (library + switcher) | yes (library + wizard) | yes (switcher)          |
 | QIF / CSV / OFX import                              | yes (mapping, dupes)     | no                     | no                      |
-| XML export on mobile                                | n/a                      | no                     | no                      |
+| XML export on mobile                                | n/a                      | yes (gzip XML)         | yes (gzip XML)          |
 | Supporter one-time purchase                         | n/a                      | StoreKit               | Play adapter            |
 | Design theme                                        | yes                      | yes (accent palette)   | yes (Material 3 indigo) |
 | Auth, billing, TOTP, tenant routing                 | yes                      | n/a                    | n/a                     |
