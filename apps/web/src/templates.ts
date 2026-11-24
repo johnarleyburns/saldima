@@ -219,6 +219,11 @@ export function templateById(id: string | undefined): BookTemplate {
   return id && isTemplateId(id) ? TEMPLATES[id] : PERSONAL;
 }
 
+/** Templates seeded from a file are shown as imported, not as `personal`. */
+export function templateLabel(id: string): string {
+  return isTemplateId(id) ? TEMPLATES[id].name : "Imported";
+}
+
 export function flattenTemplate(template: BookTemplate): FlatTemplateAccount[] {
   const rows: FlatTemplateAccount[] = [];
   const visit = (account: TemplateAccount, parentPath: string | null): void => {
