@@ -190,3 +190,51 @@ test("multi: companies can be created and switched without mixing charts", async
   ).toHaveCount(0);
   await expect(page.getByText("My book")).toBeVisible();
 });
+
+test("imports: a QIF statement is mapped, posted and flagged as a duplicate", async ({
+  page,
+}, testInfo) => {
+  const email = `imports-${testInfo.project.name}@example.test`;
+  await fillSetup(page, testInfo, "imports", email, SETUP_TOKEN, "small-business");
+  await enrollTotp(page);
+
+  await page.goto(bookUrl("imports", testInfo, "/app/import/transactions"));
+  await page
+    .getByLabel("Statement account")
+    .selectOption({ label: "Business Checking (Bank)" });
+  await page.getByLabel("Statement file").setInputFiles({
+    name: "bank.qif",
+    mimeType: "text/plain",
+    buffer: Buffer.from(`!Type:Bank
+D01/15/2024
+T100.00
+PClient payment
+LSales
+^
+`),
+  });
+  await page.getByRole("button", { name: "Continue to mapping" }).click();
+  await expect(page.getByText("Client payment")).toBeVisible();
+  await page.getByRole("button", { name: "Import 1 transaction" }).click();
+  await expect(page.getByRole("heading", { name: "General Journal" })).toBeVisible();
+  await expect(page.getByText("Client payment")).toBeVisible();
+
+  await page.goto(bookUrl("imports", testInfo, "/app/import/transactions"));
+  await page
+    .getByLabel("Statement account")
+    .selectOption({ label: "Business Checking (Bank)" });
+  await page.getByLabel("Statement file").setInputFiles({
+    name: "bank.qif",
+    mimeType: "text/plain",
+    buffer: Buffer.from(`!Type:Bank
+D01/15/2024
+T100.00
+PClient payment
+LSales
+^
+`),
+  });
+  await page.getByRole("button", { name: "Continue to mapping" }).click();
+  await expect(page.getByText("Possible duplicate", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Import possible duplicates too")).toBeVisible();
+});
