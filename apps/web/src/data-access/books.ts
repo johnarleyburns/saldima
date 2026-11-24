@@ -6,6 +6,7 @@ interface ExecLike {
 
 /** Removes one company and its ledger rows. Users and sessions stay intact. */
 export function deleteBook(sql: ExecLike, bookId: string): void {
+  sql.exec("DELETE FROM gcw_import_batches WHERE book_id = ?", bookId);
   sql.exec("DELETE FROM splits WHERE book_id = ?", bookId);
   sql.exec("DELETE FROM transactions WHERE book_id = ?", bookId);
   sql.exec("DELETE FROM accounts WHERE book_id = ?", bookId);

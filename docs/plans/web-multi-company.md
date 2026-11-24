@@ -45,6 +45,9 @@ auth.
   marks it as `imported`, taking the file's currency when the snapshot has one.
 - XML export writes only the active book; filename is the company name
   (`Acme-Ltd.gnucash`) and the XML book guid derives from tenant + book.
+- Bank statements (QIF, CSV, OFX/QFX) stage in `gcw_import_batches`, scoped by
+  book, and are removed with the book. Parsed rows are never posted until the
+  mapping screen is submitted.
 
 ## Tests
 

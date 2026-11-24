@@ -53,11 +53,20 @@ importers:
       '@saldima/gnucash':
         specifier: workspace:*
         version: link:../../packages/gnucash
+      '@saldima/importers':
+        specifier: workspace:*
+        version: link:../../packages/importers
       qrcode-generator:
         specifier: 2.0.4
         version: 2.0.4
 
   packages/gnucash: {}
+
+  packages/importers:
+    dependencies:
+      '@saldima/gnucash':
+        specifier: workspace:*
+        version: link:../gnucash
 
   packages/testkit:
     dependencies:

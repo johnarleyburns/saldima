@@ -4,6 +4,7 @@ import {
   type BookSnapshot,
   equalsMoney,
   formatMoney,
+  isZeroMoney,
   type Money,
   money,
   newGuid,
@@ -11,6 +12,17 @@ import {
   readBookSnapshot,
   writeGnuCashXml,
 } from "@saldima/gnucash";
+import {
+  categoryKey,
+  decodeImportRows,
+  encodeImportRows,
+  ImportFormatError,
+  type ImportResult,
+  type ImportRow,
+  isLikelyDuplicate,
+  parseImportFile,
+  planImport,
+} from "@saldima/importers";
 import { type Context, Hono } from "hono";
 import {
   clearedSessionCookie,
@@ -47,6 +59,12 @@ import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
 import { replaceBook } from "./data-access/book-import.ts";
 import { deleteBook } from "./data-access/books.ts";
+import {
+  deleteImportBatch,
+  deleteStaleImportBatches,
+  insertImportBatch,
+  type StagedImport,
+} from "./data-access/imports.ts";
 import { designCss } from "./design.ts";
 import { totpQrSvg } from "./qr.ts";
 import { balanceSheet, incomeStatement, trialBalance } from "./reports.ts";
@@ -140,6 +158,16 @@ interface AccountNode extends AccountRow {
 }
 
 const SESSION_SECONDS = 30 * 24 * 60 * 60;
+const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
+const IMPORT_TARGET_TYPES = new Set([
+  "ASSET",
+  "BANK",
+  "CASH",
+  "CREDIT",
+  "LIABILITY",
+  "RECEIVABLE",
+  "PAYABLE",
+]);
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -233,6 +261,19 @@ export class Book {
         currency TEXT NOT NULL DEFAULT 'USD',
         created_at TEXT NOT NULL
       )`,
+    );
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS gcw_import_batches (
+        id TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL,
+        target_account_guid TEXT NOT NULL,
+        source TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+    );
+    this.sql.exec(
+      "CREATE INDEX IF NOT EXISTS import_batches_book_idx ON gcw_import_batches(book_id)",
     );
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS accounts (
@@ -338,6 +379,13 @@ export class Book {
     app.get("/app/export/xml", (c) => this.exportXml(c));
     app.get("/app/import", (c) => this.importPage(c));
     app.post("/app/import", (c) => this.importBook(c));
+    app.get("/app/import/transactions", (c) => this.importTransactionsPage(c));
+    app.post("/app/import/transactions", (c) => this.uploadTransactions(c));
+    app.get("/app/import/transactions/:id", (c) => this.importMappingPage(c));
+    app.post("/app/import/transactions/:id", (c) => this.commitTransactions(c));
+    app.post("/app/import/transactions/:id/cancel", (c) =>
+      this.cancelTransactionImport(c),
+    );
     app.get("/app/reports", (c) => this.reportsPage(c));
     app.get("/app/help", (c) => this.helpPage(c));
     app.get("/app/journal", (c) => this.journalPage(c));
@@ -905,6 +953,117 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     return Number(row?.count ?? 0);
   }
 
+  private importAccounts(bookId: string): AccountRow[] {
+    return this.accountRows(bookId).filter(
+      (account) => !account.placeholder && !account.hidden,
+    );
+  }
+
+  private importTargetAccounts(bookId: string): AccountRow[] {
+    return this.importAccounts(bookId).filter((account) =>
+      IMPORT_TARGET_TYPES.has(account.account_type),
+    );
+  }
+
+  /** Unmatched rows post to a visible "Imports" equity account. */
+  private ensureImportsAccount(bookId: string): string {
+    const existing = this.accountRows(bookId).find(
+      (account) => account.name.trim().toLowerCase() === "imports",
+    );
+    if (existing) {
+      if (existing.hidden || existing.placeholder) {
+        this.sql.exec(
+          "UPDATE accounts SET hidden = 0, placeholder = 0 WHERE guid = ? AND book_id = ?",
+          existing.guid,
+          bookId,
+        );
+      }
+      return existing.guid;
+    }
+    const guid = newGuid();
+    this.sql.exec(
+      `INSERT INTO accounts
+       (guid, book_id, name, account_type, commodity_guid, parent_guid, code,
+        description, hidden, placeholder, created_at)
+       VALUES (?, ?, 'Imports', 'EQUITY', NULL, NULL, NULL, NULL, 0, 0, ?)`,
+      guid,
+      bookId,
+      nowIso(),
+    );
+    return guid;
+  }
+
+  private stagedImport(id: string, bookId: string): StagedImport | null {
+    const row =
+      this.rows<{
+        id: string;
+        book_id: string;
+        target_account_guid: string;
+        source: string;
+        payload: string;
+        created_at: string;
+      }>(
+        `SELECT id, book_id, target_account_guid, source, payload, created_at
+         FROM gcw_import_batches WHERE id = ? AND book_id = ? LIMIT 1`,
+        id,
+        bookId,
+      )[0] ?? null;
+    return row
+      ? {
+          id: row.id,
+          bookId: row.book_id,
+          targetAccountGuid: row.target_account_guid,
+          source: row.source,
+          payload: row.payload,
+          createdAt: row.created_at,
+        }
+      : null;
+  }
+
+  private splitHistory(
+    bookId: string,
+    accountGuid: string,
+  ): Array<{ date: string; amount: Money }> {
+    return this.rows<{ post_date: string; value_num: string; value_denom: string }>(
+      `SELECT t.post_date, s.value_num, s.value_denom
+       FROM splits s JOIN transactions t ON t.guid = s.tx_guid
+       WHERE s.book_id = ? AND t.book_id = ? AND s.account_guid = ?`,
+      bookId,
+      bookId,
+      accountGuid,
+    ).map((row) => ({
+      date: row.post_date.slice(0, 10),
+      amount: money(BigInt(row.value_num), BigInt(row.value_denom)),
+    }));
+  }
+
+  private importCategories(rows: readonly ImportRow[]): string[] {
+    const categories = new Set<string>();
+    for (const row of rows) {
+      const main = categoryKey(row.category);
+      if (main) categories.add(main);
+      for (const split of row.splits) {
+        const key = categoryKey(split.category);
+        if (key) categories.add(key);
+      }
+    }
+    return [...categories].sort((left, right) => left.localeCompare(right));
+  }
+
+  private accountOptionsFor(
+    accounts: readonly AccountRow[],
+    selected: string,
+    exclude: string,
+  ): string {
+    return accounts
+      .filter((account) => account.guid !== exclude)
+      .map(
+        (account) =>
+          `<option value="${escapeHtml(account.guid)}"${account.guid === selected ? " selected" : ""}>${escapeHtml(account.name)} (${escapeHtml(typeLabel(account.account_type))})</option>`,
+      )
+      .join("");
+  }
+
   private async editAccountPage(
     c: BookContext,
     guid: string,
@@ -1055,6 +1214,9 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <input id="file" name="file" type="file" required accept=".gnucash,.sqlite,application/gzip,application/xml">
 <button type="submit">Import</button>
 </form>
+<div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Bank transactions</h2>
+<p class="muted">QIF, CSV and OFX/QFX statements are matched to your accounts with duplicate detection before anything is posted.</p>
+<p><a class="cta" href="/app/import/transactions">Import transactions</a></p></div>
 <p><a href="/app/accounts">Cancel</a></p>`,
       ),
       200,
@@ -1090,6 +1252,283 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       );
     }
     return c.redirect("/app/accounts");
+  }
+
+  private async importTransactionsPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const targets = this.importTargetAccounts(bookId);
+    return c.html(
+      this.appPage(
+        "Import transactions",
+        `<h1>Import bank transactions</h1>
+<p class="muted">QIF, CSV or OFX/QFX. Nothing is posted until you map the categories on the next screen.</p>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+${
+  targets.length === 0
+    ? `<p class="error">Add a bank, cash, card or other asset/liability account first.</p>
+<p><a href="/app/accounts/new">Add account</a></p>`
+    : `<form method="post" action="/app/import/transactions" enctype="multipart/form-data">
+<label for="target">Statement account</label>
+<select id="target" name="target" required>
+${targets.map((account) => `<option value="${escapeHtml(account.guid)}">${escapeHtml(account.name)} (${escapeHtml(typeLabel(account.account_type))})</option>`).join("")}
+</select>
+<label for="statement">Statement file</label>
+<input id="statement" name="file" type="file" required accept=".qif,.csv,.ofx,.qfx,text/csv,application/x-ofx,application/vnd.intu.qfx">
+<button type="submit">Continue to mapping</button>
+</form>`
+}
+<p><a href="/app/import">Back to import</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async uploadTransactions(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const bookId = c.get("bookId");
+    const targetGuid = formValue(body, "target");
+    const target = targetGuid ? this.accountByGuid(targetGuid, bookId) : null;
+    if (
+      !target ||
+      target.placeholder ||
+      target.hidden ||
+      !IMPORT_TARGET_TYPES.has(target.account_type)
+    ) {
+      return this.importTransactionsPage(c, "Choose a valid statement account.");
+    }
+    const file = body.file;
+    if (!(file instanceof File)) {
+      return this.importTransactionsPage(c, "Choose a QIF, CSV or OFX file.");
+    }
+    if (file.size > MAX_IMPORT_BYTES) {
+      return this.importTransactionsPage(c, "That file is larger than 10 MB.");
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      return this.importTransactionsPage(c, "That file could not be read as text.");
+    }
+    if (text.includes("\u0000")) {
+      return this.importTransactionsPage(c, "That file is not a text statement.");
+    }
+    let parsed: ImportResult;
+    try {
+      parsed = parseImportFile(file.name, text);
+    } catch (error) {
+      if (error instanceof ImportFormatError) {
+        return this.importTransactionsPage(c, error.message);
+      }
+      return this.importTransactionsPage(c, "That statement could not be read.");
+    }
+    const id = newGuid();
+    const createdAt = nowIso();
+    deleteStaleImportBatches(this.sql, bookId, isoAfterSeconds(-24 * 60 * 60));
+    insertImportBatch(this.sql, {
+      id,
+      bookId,
+      targetAccountGuid: target.guid,
+      source: parsed.source,
+      payload: encodeImportRows(parsed.rows),
+      createdAt,
+    });
+    return c.redirect(`/app/import/transactions/${id}`);
+  }
+
+  private async importMappingPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const id = c.req.param("id") ?? "";
+    const batch = id ? this.stagedImport(id, bookId) : null;
+    if (!batch) return c.text("Import not found", 404);
+    const target = this.accountByGuid(batch.targetAccountGuid, bookId);
+    if (!target) {
+      deleteImportBatch(this.sql, batch.id, bookId);
+      return c.text("The statement account no longer exists", 404);
+    }
+    let rows: ImportRow[];
+    try {
+      rows = decodeImportRows(batch.payload);
+    } catch {
+      deleteImportBatch(this.sql, batch.id, bookId);
+      return c.text("That staged import is no longer readable", 404);
+    }
+    const history = this.splitHistory(bookId, target.guid);
+    const duplicates = rows.map((row) => isLikelyDuplicate(row, history));
+    const duplicateCount = duplicates.filter(Boolean).length;
+    const accounts = this.importAccounts(bookId);
+    const importsGuid = this.ensureImportsAccount(bookId);
+    if (!accounts.some((account) => account.guid === importsGuid)) {
+      const imports = this.accountByGuid(importsGuid, bookId);
+      if (imports) accounts.push(imports);
+    }
+    const byName = new Map(
+      accounts
+        .filter((account) => account.guid !== target.guid)
+        .map((account) => [account.name.trim().toLowerCase(), account.guid]),
+    );
+    const categories = this.importCategories(rows);
+    const categoryRows = categories
+      .map((key, index) => {
+        const chosen = byName.get(key.toLowerCase()) ?? importsGuid;
+        return `<tr><td>${escapeHtml(key)}</td><td><select name="category_${index}">${this.accountOptionsFor(accounts, chosen, target.guid)}</select></td></tr>`;
+      })
+      .join("");
+    const preview = rows
+      .slice(0, 200)
+      .map(
+        (row, index) =>
+          `<li><span>${escapeHtml(row.date)} · ${escapeHtml(row.payee || row.memo || "Imported transaction")}${row.category ? ` <span class="muted">(${escapeHtml(row.category)})</span>` : ""}${duplicates[index] ? ' <span class="chip">Possible duplicate</span>' : ""}</span><span class="amount">${formatMoney(row.amount, 100n)}</span></li>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "Map transactions",
+        `<h1>Map transactions</h1>
+<p class="muted">${escapeHtml(batch.source.toUpperCase())} statement for <strong>${escapeHtml(target.name)}</strong> · ${rows.length} transaction${rows.length === 1 ? "" : "s"}${duplicateCount > 0 ? ` · <strong>${duplicateCount} possible duplicate${duplicateCount === 1 ? "" : "s"}</strong>` : ""}</p>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+${
+  categories.length > 0
+    ? `<div class="card"><h2 style="margin-top:0">Categories</h2>
+<table><thead><tr><th>Statement category</th><th>Account</th></tr></thead><tbody>${categoryRows}</tbody></table></div>`
+    : `<p class="muted">This file has no categories; every row uses the account below.</p>`
+}
+<form method="post" action="/app/import/transactions/${escapeHtml(batch.id)}">
+<h2>Default account</h2>
+<p class="muted">Used for rows without a mapped category.</p>
+<label for="default-account">Default account</label>
+<select id="default-account" name="default_account" required>${this.accountOptionsFor(accounts, importsGuid, target.guid)}</select>
+${
+  duplicateCount > 0
+    ? `<label><input type="checkbox" name="include_duplicates"> Import possible duplicates too</label>`
+    : ""
+}
+<button type="submit">Import ${rows.length} transaction${rows.length === 1 ? "" : "s"}</button>
+</form>
+<form method="post" action="/app/import/transactions/${escapeHtml(batch.id)}/cancel"><button type="submit" class="secondary">Cancel</button></form>
+<div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Preview</h2>
+<ul class="journal">${preview}</ul>${rows.length > 200 ? `<p class="muted">Showing the first 200 rows.</p>` : ""}</div>`,
+      ),
+      200,
+    );
+  }
+
+  private async commitTransactions(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const id = c.req.param("id") ?? "";
+    const batch = id ? this.stagedImport(id, bookId) : null;
+    if (!batch) return c.text("Import not found", 404);
+    const target = this.accountByGuid(batch.targetAccountGuid, bookId);
+    if (!target) {
+      deleteImportBatch(this.sql, batch.id, bookId);
+      return c.text("The statement account no longer exists", 404);
+    }
+    let rows: ImportRow[];
+    try {
+      rows = decodeImportRows(batch.payload);
+    } catch {
+      deleteImportBatch(this.sql, batch.id, bookId);
+      return c.text("That staged import is no longer readable", 404);
+    }
+    const body = await c.req.parseBody();
+    const defaultGuid = formValue(body, "default_account");
+    const defaultAccount = defaultGuid ? this.accountByGuid(defaultGuid, bookId) : null;
+    if (
+      !defaultAccount ||
+      defaultAccount.placeholder ||
+      defaultAccount.hidden ||
+      defaultAccount.guid === target.guid
+    ) {
+      return this.importMappingPage(c, "Choose where unmatched rows should post.");
+    }
+    const accounts = new Set(this.importAccounts(bookId).map((row) => row.guid));
+    const categoryAccounts: Record<string, string> = {};
+    const categories = this.importCategories(rows);
+    for (const [index, key] of categories.entries()) {
+      const guid = formValue(body, `category_${index}`) || defaultAccount.guid;
+      if (!accounts.has(guid) || guid === target.guid) {
+        return this.importMappingPage(c, `Choose a valid account for ${key}.`);
+      }
+      categoryAccounts[key] = guid;
+    }
+    const history = this.splitHistory(bookId, target.guid);
+    const includeDuplicates = body.include_duplicates === "on";
+    const selected = rows.filter(
+      (row) => includeDuplicates || !isLikelyDuplicate(row, history),
+    );
+    if (selected.length === 0) {
+      return this.importMappingPage(
+        c,
+        "Every row looks like a duplicate. Tick the box to import them anyway.",
+      );
+    }
+    const planned = planImport(selected, {
+      targetAccountGuid: target.guid,
+      defaultAccountGuid: defaultAccount.guid,
+      categoryAccounts,
+    });
+    const knownAccounts = new Set(this.accountRows(bookId).map((row) => row.guid));
+    for (const transaction of planned) {
+      let total = money(0n);
+      for (const split of transaction.splits) {
+        if (!knownAccounts.has(split.accountGuid)) {
+          return this.importMappingPage(c, "A mapped account no longer exists.");
+        }
+        total = addMoney(total, split.value);
+      }
+      if (transaction.splits.length < 2 || !isZeroMoney(total)) {
+        return this.importMappingPage(c, "That statement could not be balanced.");
+      }
+      const txGuid = newGuid();
+      this.sql.exec(
+        `INSERT INTO transactions
+         (guid, book_id, currency_guid, post_date, description, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?)`,
+        txGuid,
+        bookId,
+        transaction.date,
+        transaction.description,
+        nowIso(),
+      );
+      for (const split of transaction.splits) {
+        this.sql.exec(
+          `INSERT INTO splits
+           (guid, book_id, tx_guid, account_guid, value_num, value_denom)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          newGuid(),
+          bookId,
+          txGuid,
+          split.accountGuid,
+          split.value.num.toString(),
+          split.value.denom.toString(),
+        );
+      }
+    }
+    deleteImportBatch(this.sql, batch.id, bookId);
+    return c.redirect("/app/journal");
+  }
+
+  private async cancelTransactionImport(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const id = c.req.param("id") ?? "";
+    if (id) deleteImportBatch(this.sql, id, c.get("bookId"));
+    return c.redirect("/app/import/transactions");
   }
 
   private async exportXml(c: BookContext): Promise<Response> {
@@ -1220,6 +1659,10 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       [
         "Journal and register",
         "Post a balanced entry from the Journal. Every split keeps an exact fraction, and the accounts update immediately.",
+      ],
+      [
+        "Importing a bank statement",
+        "Upload a QIF, CSV or OFX/QFX file against the bank or card account it belongs to. Map statement categories to accounts, then post. Rows matching an existing posting on the same account, amount and a date within three days are marked as possible duplicates and skipped unless you include them.",
       ],
       [
         "Reports",

@@ -19,7 +19,7 @@ iOS: `saldima-ios/docs/plans/P1-MOBILE.md`.
 | Reports                                             | yes                      | yes                    | yes                     |
 | Help topics                                         | yes                      | yes                    | yes                     |
 | Multiple companies                                  | yes (library + switcher) | yes (library + wizard) | yes (switcher)          |
-| QIF / CSV / OFX import                              | no                       | no                     | no                      |
+| QIF / CSV / OFX import                              | yes (mapping, dupes)     | no                     | no                      |
 | XML export on mobile                                | n/a                      | no                     | no                      |
 | Supporter one-time purchase                         | n/a                      | StoreKit               | Play adapter            |
 | Design theme                                        | yes                      | yes (accent palette)   | yes (Material 3 indigo) |
@@ -38,7 +38,7 @@ books cannot leak into each other.
 
 ## Next work, in order
 
-1. QIF/CSV/OFX import with mapping + duplicate detection; XML export on mobile.
+1. XML export on mobile; QIF/CSV export on web (remaining #52).
 2. 100 industry templates and country overlays (`P2.md` track 2).
 3. GnuCash locale set with machine-marked translations (`P2.md` track 3).
 4. Interface parity remainders: register columns/reconcile, report options,
