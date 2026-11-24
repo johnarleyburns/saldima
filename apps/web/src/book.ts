@@ -23,6 +23,7 @@ import {
 } from "./auth.ts";
 import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
+import { designCss } from "./design.ts";
 import { totpQrSvg } from "./qr.ts";
 import {
   ACCOUNT_TYPES,
@@ -113,29 +114,7 @@ function page(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>${escapeHtml(title)} — Saldima</title>
-<style>
-:root { color-scheme: light dark; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
-body { margin: 0; background: Canvas; color: CanvasText; }
-main { max-width: 26rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-h1 { font-size: 1.75rem; margin: 0 0 0.25rem; }
-p { line-height: 1.5; }
-label { display: block; margin-top: 1rem; font-weight: 600; }
-input { box-sizing: border-box; width: 100%; min-height: 44px; margin-top: 0.35rem; padding: 0.6rem 0.75rem; font: inherit; border: 1px solid GrayText; border-radius: 0.5rem; background: Field; color: FieldText; }
-button { min-height: 44px; margin-top: 1.25rem; width: 100%; font: inherit; font-weight: 650; border: 0; border-radius: 0.5rem; background: #12664f; color: white; cursor: pointer; }
-.error { padding: 0.75rem; border-radius: 0.5rem; background: #7f1d1d; color: white; }
-.muted { color: GrayText; font-size: 0.9rem; }
-code { display: block; overflow-wrap: anywhere; padding: 0.75rem; background: Field; border: 1px solid GrayText; border-radius: 0.5rem; }
-.qr { max-width: 15rem; margin: 1rem auto; padding: 0.75rem; background: white; border-radius: 0.75rem; }
-.qr svg { display: block; width: 100%; height: auto; }
-.danger { background: #991b1b; }
-.appbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; }
-.appbar .brand { color: inherit; font-weight: 700; text-decoration: none; }
-.appbar nav { display: flex; gap: 1rem; }
-.appbar nav a { display: inline-flex; align-items: center; min-height: 44px; color: inherit; }
-.appfoot { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid color-mix(in srgb, GrayText 40%, transparent); font-size: 0.9rem; color: GrayText; }
-.appfoot a { color: inherit; }
-nav a { color: inherit; }
-</style>
+<style>${designCss}</style>
 </head>
 <body><main>${body}</main></body>
 </html>`;
@@ -668,7 +647,7 @@ ${setupBlock}
           .filter(Boolean)
           .join(" · ");
         const row = `<a href="/app/accounts/${escapeHtml(node.guid)}/edit"><strong>${escapeHtml(node.name)}</strong></a>
-<span class="muted">${escapeHtml(typeLabel(node.account_type))}${flags ? ` · ${flags}` : ""}</span>`;
+<span class="chip type-${escapeHtml(node.account_type.toLowerCase())}">${escapeHtml(typeLabel(node.account_type))}</span>${flags ? `<span class="muted">${flags}</span>` : ""}`;
         const open = `<li data-account-guid="${escapeHtml(node.guid)}" data-account-name="${escapeHtml(node.name)}">
 ${row}
 ${this.renderAccountTree(node.children, depth + 1)}
@@ -953,12 +932,18 @@ ${body}
     return c.html(
       this.appPage(
         "Book",
-        `<h1>Saldima</h1>
-<p class="muted">Book ${escapeHtml(c.get("tenantId"))}</p>
-<p>Signed in as <strong>${escapeHtml(user.email)}</strong> (${escapeHtml(user.role)}).</p>
-<p><a href="/app/accounts">Accounts (${this.accountRows().length})</a></p>
-<p class="muted">Chart of accounts</p>
-<form method="post" action="/app/logout"><button type="submit">Sign out</button></form>`,
+        `<h1>Your books</h1>
+<p class="muted">${escapeHtml(user.email)} · ${escapeHtml(user.role)} · ${escapeHtml(c.get("tenantId"))}</p>
+<div class="summary">
+<div class="stat accent"><div class="label">Accounts</div><div class="value">${this.accountRows().length}</div></div>
+<div class="stat green"><div class="label">Net assets</div><div class="value">0.00</div></div>
+<div class="stat blue"><div class="label">Profit</div><div class="value">0.00</div></div>
+</div>
+<div class="grid">
+<a class="card" href="/app/accounts" style="text-decoration:none;color:inherit"><h2 style="margin-top:0">Chart of accounts</h2><p class="muted">Browse, add and edit accounts. Branches fold like the desktop tree.</p></a>
+<div class="card"><h2 style="margin-top:0">Compatible with GnuCash</h2><p class="muted">SQLite and XML books, exact split values, half-up posting.</p></div>
+</div>
+<form method="post" action="/app/logout"><button type="submit" class="secondary">Sign out</button></form>`,
       ),
       200,
     );
