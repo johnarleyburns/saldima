@@ -7,6 +7,7 @@ import {
   money,
   newGuid,
   parseMoneyHalfUp,
+  readBookSnapshot,
   writeGnuCashXml,
 } from "@saldima/gnucash";
 import { type Context, Hono } from "hono";
@@ -265,6 +266,8 @@ export class Book {
     app.post("/app/accounts/:guid", (c) => this.updateAccount(c));
     app.post("/app/accounts/:guid/delete", (c) => this.deleteAccount(c));
     app.get("/app/export/xml", (c) => this.exportXml(c));
+    app.get("/app/import", (c) => this.importPage(c));
+    app.post("/app/import", (c) => this.importBook(c));
     app.get("/app/reports", (c) => this.reportsPage(c));
     app.get("/app/help", (c) => this.helpPage(c));
     app.get("/app/journal", (c) => this.journalPage(c));
@@ -892,11 +895,90 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <div class="stat green"><div class="label">Net assets</div><div class="value">${formatMoney(totals.netAssets, 100n)}</div></div>
 <div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
 </div>
-<p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a> · <a href="/app/journal">Journal</a></p>
+<p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a> · <a href="/app/journal">Journal</a> · <a href="/app/import">Import</a> · <a href="/app/export/xml">Export</a></p>
 ${this.renderAccountTree(this.accountsTree(), 0, balances)}`,
       ),
       200,
     );
+  }
+
+  private async importPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    return c.html(
+      this.appPage(
+        "Import a book",
+        `<h1>Import a GnuCash book</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<p class="muted">Accepts a .gnucash file in SQLite or gzip XML. This replaces the accounts and transactions in this hosted book.</p>
+<form method="post" action="/app/import" enctype="multipart/form-data">
+<label for="file">Book file</label>
+<input id="file" name="file" type="file" required accept=".gnucash,.sqlite,application/gzip,application/xml">
+<button type="submit">Import</button>
+</form>
+<p><a href="/app/accounts">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async importBook(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const file = body.file;
+    if (!(file instanceof File)) return this.importPage(c, "Choose a book file.");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let snapshot;
+    try {
+      snapshot = await readBookSnapshot(bytes);
+    } catch {
+      return this.importPage(c, "That file is not a GnuCash SQLite or XML book.");
+    }
+    if (snapshot.accounts.length === 0) {
+      return this.importPage(c, "The book has no accounts.");
+    }
+    this.sql.exec("DELETE FROM splits");
+    this.sql.exec("DELETE FROM transactions");
+    this.sql.exec("DELETE FROM accounts");
+    for (const account of snapshot.accounts) {
+      this.sql.exec(
+        `INSERT INTO accounts
+         (guid, name, account_type, commodity_guid, parent_guid, code,
+          description, hidden, placeholder, created_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, 0, 0, ?)`,
+        account.guid,
+        account.name,
+        account.type,
+        account.parentGuid,
+        account.code,
+        account.description,
+        nowIso(),
+      );
+    }
+    for (const transaction of snapshot.transactions) {
+      this.sql.exec(
+        "INSERT INTO transactions (guid, currency_guid, post_date, description, created_at) VALUES (?, NULL, ?, ?, ?)",
+        transaction.guid,
+        transaction.date,
+        transaction.description,
+        nowIso(),
+      );
+      for (const split of transaction.splits) {
+        this.sql.exec(
+          "INSERT INTO splits (guid, tx_guid, account_guid, value_num, value_denom) VALUES (?, ?, ?, ?, ?)",
+          newGuid(),
+          transaction.guid,
+          split.accountGuid,
+          split.value.num.toString(),
+          split.value.denom.toString(),
+        );
+      }
+    }
+    return c.redirect("/app/accounts");
   }
 
   private async exportXml(c: BookContext): Promise<Response> {
