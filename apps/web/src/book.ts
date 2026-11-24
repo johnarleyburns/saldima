@@ -7,9 +7,9 @@ import {
   money,
   newGuid,
   parseMoneyHalfUp,
+  writeGnuCashXml,
 } from "@saldima/gnucash";
 import { type Context, Hono } from "hono";
-
 import {
   clearedSessionCookie,
   decryptTotpSecret,
@@ -264,6 +264,7 @@ export class Book {
     );
     app.post("/app/accounts/:guid", (c) => this.updateAccount(c));
     app.post("/app/accounts/:guid/delete", (c) => this.deleteAccount(c));
+    app.get("/app/export/xml", (c) => this.exportXml(c));
     app.get("/app/reports", (c) => this.reportsPage(c));
     app.get("/app/help", (c) => this.helpPage(c));
     app.get("/app/journal", (c) => this.journalPage(c));
@@ -896,6 +897,64 @@ ${this.renderAccountTree(this.accountsTree(), 0, balances)}`,
       ),
       200,
     );
+  }
+
+  private async exportXml(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const tenantId = c.get("tenantId");
+    const accounts = this.accountRows().map((row) => ({
+      guid: row.guid,
+      name: row.name,
+      type: row.account_type,
+      parentGuid: row.parent_guid,
+      commodityCode: "USD",
+      code: row.code ?? "",
+      description: "",
+    }));
+    const splitRows = this.rows<{
+      tx_guid: string;
+      account_guid: string;
+      value_num: string;
+      value_denom: string;
+    }>("SELECT tx_guid, account_guid, value_num, value_denom FROM splits");
+    const transactions = this.rows<{
+      guid: string;
+      post_date: string;
+      description: string;
+    }>("SELECT guid, post_date, description FROM transactions ORDER BY post_date").map(
+      (tx) => ({
+        guid: tx.guid,
+        date: tx.post_date.slice(0, 10),
+        description: tx.description,
+        currencyCode: "USD",
+        splits: splitRows
+          .filter((split) => split.tx_guid === tx.guid)
+          .map((split) => ({
+            accountGuid: split.account_guid,
+            value: money(BigInt(split.value_num), BigInt(split.value_denom)),
+          })),
+      }),
+    );
+    const xml = writeGnuCashXml({
+      bookGuid: (await sha256Hex(tenantId)).slice(0, 32),
+      currencyCode: "USD",
+      fraction: 100,
+      accounts,
+      transactions,
+    });
+    const gzipped = await new Response(
+      new Blob([new TextEncoder().encode(xml)])
+        .stream()
+        .pipeThrough(new CompressionStream("gzip")),
+    ).arrayBuffer();
+    return new Response(gzipped, {
+      headers: {
+        "content-type": "application/gzip",
+        "content-disposition": `attachment; filename="${tenantId}.gnucash"`,
+      },
+    });
   }
 
   private async reportsPage(c: BookContext): Promise<Response> {
