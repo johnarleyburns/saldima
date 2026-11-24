@@ -913,7 +913,7 @@ ${this.renderAccountTree(this.accountsTree(), 0, balances)}`,
         "Import a book",
         `<h1>Import a GnuCash book</h1>
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
-<p class="muted">Accepts a .gnucash file in SQLite or gzip XML. This replaces the accounts and transactions in this hosted book.</p>
+<p class="muted">Accepts a gzip XML .gnucash book (the desktop default). SQLite books open in the iPhone and Android apps. Importing replaces the accounts and transactions in this hosted book.</p>
 <form method="post" action="/app/import" enctype="multipart/form-data">
 <label for="file">Book file</label>
 <input id="file" name="file" type="file" required accept=".gnucash,.sqlite,application/gzip,application/xml">
