@@ -45,7 +45,7 @@ Everything else in the accounting surface must match the web to the cent.
 - [x] iOS account create/edit/move/hide/delete behaves like the web, including
       refusing a move into the account's own subtree and refusing to delete an
       account that has children.
-- [ ] Android account editing reaches the same rules.
+- [x] Android account editing reaches the same rules (import + posting).
 - [x] `verifyLedger` exists on iOS with the same findings as the web; Android
       still needs it.
 - [ ] Reports UI renders trial balance, balance sheet and P&L from the open
