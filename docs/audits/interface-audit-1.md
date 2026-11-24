@@ -38,3 +38,14 @@ Spec: `docs/spec/INTERFACE.md`.
 - Report window chrome: options bar, reload, save report.
 - Help search relevance: a new user should find "how do I reconcile" in two
   keystrokes.
+
+## Round 2 — applied after the first pass
+
+- The structural ROOT row is gone from the iOS tree; the spec now states the
+  rule for every track.
+- iOS keeps a library of company files with a switcher, a New book wizard
+  (name, template, USD/EUR/GBP) and Import book via the system picker.
+- iOS shows per-account balances plus Net assets and Profit.
+- Every deferred item is assigned: multi-company/wizard web #49 and iOS #38,
+  totals web #50, menus and General Journal web #51 / iOS #39, import/export
+  web #52 / iOS #40, Android parity #17 (plus #15 help and #16 formats).
