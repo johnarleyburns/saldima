@@ -143,6 +143,9 @@ code { display: block; overflow-wrap: anywhere; padding: .8rem; background: var(
   border-bottom: 1px solid var(--border);
 }
 .accounts a { color: var(--text); text-decoration: none; }
+.amount { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
+.journal { list-style: none; margin: .5rem 0 0; padding: 0; }
+.journal li { display: flex; justify-content: space-between; gap: 1rem; padding: .3rem 0; border-bottom: 1px solid var(--border); }
 .chip {
   display: inline-flex; align-items: center; padding: .12rem .5rem;
   border-radius: 999px; font-size: .74rem; font-weight: 650; letter-spacing: .02em;
