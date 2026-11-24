@@ -67,7 +67,7 @@ async function enrollTotp(page: Page): Promise<string> {
   if (!secret) throw new Error("missing TOTP secret");
   await page.getByLabel("6-digit code").fill(totp(secret));
   await page.getByRole("button", { name: "Enable two-factor" }).click();
-  await expect(page.getByText("Signed in as")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your books" })).toBeVisible();
   return secret;
 }
 
@@ -159,4 +159,34 @@ test("bob: a separate owner can set up and reach his own book", async ({
   await expect(
     page.getByText(new RegExp(`alice-${testInfo.project.name}@example`)),
   ).toHaveCount(0);
+});
+
+test("multi: companies can be created and switched without mixing charts", async ({
+  page,
+}, testInfo) => {
+  const email = `multi-${testInfo.project.name}@example.test`;
+  await fillSetup(page, testInfo, "multi", email, SETUP_TOKEN, "personal");
+  await enrollTotp(page);
+
+  await page.getByRole("navigation").getByRole("link", { name: "Books" }).click();
+  await expect(page.getByText("My book")).toBeVisible();
+  await page.getByLabel("Company name").fill("Second Co");
+  await page.getByLabel("Chart of accounts").selectOption("small-business");
+  await page.getByLabel("Currency").selectOption("EUR");
+  await page.getByRole("button", { name: "Create company" }).click();
+
+  await expect(
+    page.getByRole("link", { name: "Business Checking", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Savings", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Second Co")).toBeVisible();
+
+  await page.getByRole("navigation").getByRole("link", { name: "Books" }).click();
+  const firstBook = page.locator("[data-book-id]").filter({ hasText: "My book" });
+  await firstBook.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByRole("link", { name: "Savings", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Business Checking", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByText("My book")).toBeVisible();
 });

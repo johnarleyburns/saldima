@@ -32,9 +32,21 @@ import {
   verifyTotp,
 } from "./auth.ts";
 import { bookTotals, rolledUpTotals, sumSplitBalances } from "./balances.ts";
+import {
+  BOOK_COOKIE,
+  BOOK_CURRENCIES,
+  bookCookie,
+  bookExportFilename,
+  clearedBookCookie,
+  DEFAULT_BOOK_ID,
+  DEFAULT_BOOK_NAME,
+  normaliseCurrency,
+  resolveBookId,
+} from "./books.ts";
 import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
 import { replaceBook } from "./data-access/book-import.ts";
+import { deleteBook } from "./data-access/books.ts";
 import { designCss } from "./design.ts";
 import { totpQrSvg } from "./qr.ts";
 import { balanceSheet, incomeStatement, trialBalance } from "./reports.ts";
@@ -43,8 +55,10 @@ import {
   type AccountType,
   type BookTemplate,
   flattenTemplate,
+  isTemplateId,
   TEMPLATE_IDS,
   templateById,
+  templateLabel,
 } from "./templates.ts";
 import { epochMs, isoAfterSeconds, nowIso } from "./time/system-clock.ts";
 
@@ -73,9 +87,17 @@ interface DurableObjectStateLike {
   readonly storage: { readonly sql: SqlStorageLike };
 }
 
-type BookVariables = { tenantId: string };
+type BookVariables = { tenantId: string; bookId: string };
 type BookContext = Context<{ Bindings: BookEnv; Variables: BookVariables }>;
 type BookApp = Hono<{ Bindings: BookEnv; Variables: BookVariables }>;
+
+interface BookRow {
+  id: string;
+  name: string;
+  template_id: string;
+  currency: string;
+  created_at: string;
+}
 
 interface UserRow {
   id: string;
@@ -157,6 +179,14 @@ export class Book {
     return this.sql.exec(query, ...bindings).toArray() as T[];
   }
 
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const present = this.rows<{ name: string }>(`PRAGMA table_info(${table})`).some(
+      (row) => row.name === column,
+    );
+    if (!present)
+      this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
   private migrate(): void {
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS gcw_users (
@@ -196,8 +226,18 @@ export class Book {
       )`,
     );
     this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS gcw_books (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        template_id TEXT NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        created_at TEXT NOT NULL
+      )`,
+    );
+    this.sql.exec(
       `CREATE TABLE IF NOT EXISTS accounts (
         guid TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL DEFAULT 'main',
         name TEXT NOT NULL,
         account_type TEXT NOT NULL,
         commodity_guid TEXT,
@@ -212,6 +252,7 @@ export class Book {
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS transactions (
         guid TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL DEFAULT 'main',
         currency_guid TEXT,
         post_date TEXT NOT NULL,
         description TEXT NOT NULL,
@@ -221,11 +262,32 @@ export class Book {
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS splits (
         guid TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL DEFAULT 'main',
         tx_guid TEXT NOT NULL,
         account_guid TEXT NOT NULL,
         value_num TEXT NOT NULL,
         value_denom TEXT NOT NULL
       )`,
+    );
+    for (const table of ["accounts", "transactions", "splits"]) {
+      this.ensureColumn(table, "book_id", "TEXT NOT NULL DEFAULT 'main'");
+      this.sql.exec(
+        `UPDATE ${table} SET book_id = ? WHERE book_id IS NULL OR book_id = ''`,
+        DEFAULT_BOOK_ID,
+      );
+    }
+    this.sql.exec("CREATE INDEX IF NOT EXISTS accounts_book_idx ON accounts(book_id)");
+    this.sql.exec(
+      "CREATE INDEX IF NOT EXISTS transactions_book_idx ON transactions(book_id)",
+    );
+    this.sql.exec("CREATE INDEX IF NOT EXISTS splits_book_idx ON splits(book_id)");
+    this.sql.exec(
+      `INSERT INTO gcw_books (id, name, template_id, currency, created_at)
+       SELECT ?, ?, 'personal', 'USD', ?
+       WHERE NOT EXISTS (SELECT 1 FROM gcw_books)`,
+      DEFAULT_BOOK_ID,
+      DEFAULT_BOOK_NAME,
+      nowIso(),
     );
   }
 
@@ -233,6 +295,7 @@ export class Book {
     const app = new Hono<{ Bindings: BookEnv; Variables: BookVariables }>();
     app.use("*", async (c, next) => {
       c.set("tenantId", this.state.id.toString());
+      c.set("bookId", this.currentBookId(c));
       await next();
     });
 
@@ -259,6 +322,11 @@ export class Book {
     app.get("/app/setup", (c) => this.setupPage(c, "", c.req.query("token") ?? ""));
     app.post("/app/setup", (c) => this.setup(c));
     app.get("/app/settings", (c) => this.settingsPage(c));
+    app.get("/app/books", (c) => this.booksPage(c));
+    app.post("/app/books", (c) => this.createBook(c));
+    app.post("/app/books/:id/select", (c) => this.selectBook(c));
+    app.post("/app/books/:id/rename", (c) => this.renameBook(c));
+    app.post("/app/books/:id/delete", (c) => this.deleteBook(c));
     app.get("/app/accounts", (c) => this.accountsPage(c));
     app.get("/app/accounts/new", (c) => this.newAccountPage(c));
     app.post("/app/accounts", (c) => this.createAccount(c));
@@ -519,7 +587,14 @@ ${TEMPLATE_IDS.map((id) => `<option value="${id}">${escapeHtml(templateById(id).
       await hashPassword(password),
       nowIso(),
     );
-    this.seedAccounts(templateById(formValue(body, "template")));
+    const template = templateById(formValue(body, "template"));
+    const bookId = c.get("bookId");
+    this.seedAccounts(template, bookId);
+    this.sql.exec(
+      "UPDATE gcw_books SET template_id = ? WHERE id = ?",
+      template.id,
+      bookId,
+    );
     if (record) deleteSetupToken(this.sql, record.token_hash);
     await this.startSession(c, userId);
     return c.redirect("/app/security/totp");
@@ -623,37 +698,85 @@ ${setupBlock}
     return c.redirect("/app");
   }
 
-  private accountRows(): AccountRow[] {
-    return this.rows<AccountRow>(
-      `SELECT guid, name, account_type, parent_guid, code, hidden, placeholder
-       FROM accounts ORDER BY name`,
+  private bookRows(): BookRow[] {
+    return this.rows<BookRow>(
+      `SELECT id, name, template_id, currency, created_at
+       FROM gcw_books ORDER BY created_at, id`,
     );
   }
 
-  private splitRows(): Array<{ accountGuid: string; value: Money }> {
+  private bookById(id: string): BookRow | null {
+    return (
+      this.rows<BookRow>(
+        `SELECT id, name, template_id, currency, created_at
+         FROM gcw_books WHERE id = ? LIMIT 1`,
+        id,
+      )[0] ?? null
+    );
+  }
+
+  private currentBookId(c: BookContext): string {
+    const cookie = readCookie(c.req.header("cookie") ?? null, BOOK_COOKIE);
+    return resolveBookId(
+      cookie,
+      this.bookRows().map((book) => book.id),
+    );
+  }
+
+  private activeBook(c: BookContext): BookRow {
+    const bookId = c.get("bookId");
+    return (
+      this.bookById(bookId) ?? {
+        id: bookId,
+        name: DEFAULT_BOOK_NAME,
+        template_id: "personal",
+        currency: "USD",
+        created_at: "",
+      }
+    );
+  }
+
+  private bookCount(): number {
+    const rows = this.rows<{ count: number }>(
+      "SELECT count(*) AS count FROM gcw_books",
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  private accountRows(bookId: string): AccountRow[] {
+    return this.rows<AccountRow>(
+      `SELECT guid, name, account_type, parent_guid, code, hidden, placeholder
+       FROM accounts WHERE book_id = ? ORDER BY name`,
+      bookId,
+    );
+  }
+
+  private splitRows(bookId: string): Array<{ accountGuid: string; value: Money }> {
     return this.rows<{ account_guid: string; value_num: string; value_denom: string }>(
-      "SELECT account_guid, value_num, value_denom FROM splits",
+      "SELECT account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
+      bookId,
     ).map((row) => ({
       accountGuid: row.account_guid,
       value: money(BigInt(row.value_num), BigInt(row.value_denom)),
     }));
   }
 
-  private balanceMap(): Map<string, Money> {
-    return sumSplitBalances(this.splitRows());
+  private balanceMap(bookId: string): Map<string, Money> {
+    return sumSplitBalances(this.splitRows(bookId));
   }
 
-  private seedAccounts(template: BookTemplate): void {
+  private seedAccounts(template: BookTemplate, bookId: string): void {
     const guids = new Map<string, string>();
     for (const row of flattenTemplate(template)) {
       const parent = row.parentPath ? (guids.get(row.parentPath) ?? null) : null;
       const guid = newGuid();
       this.sql.exec(
         `INSERT INTO accounts
-         (guid, name, account_type, commodity_guid, parent_guid, code,
+         (guid, book_id, name, account_type, commodity_guid, parent_guid, code,
           description, hidden, placeholder, created_at)
-         VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)`,
         guid,
+        bookId,
         row.name,
         row.type,
         parent,
@@ -666,8 +789,8 @@ ${setupBlock}
     }
   }
 
-  private accountsTree(): AccountNode[] {
-    const rows = this.accountRows();
+  private accountsTree(bookId: string): AccountNode[] {
+    const rows = this.accountRows(bookId);
     const nodes = new Map<string, AccountNode>();
     for (const row of rows) nodes.set(row.guid, { ...row, children: [] });
     const roots: AccountNode[] = [];
@@ -722,6 +845,7 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
   }
 
   private accountOptions(
+    bookId: string,
     exclude: ReadonlySet<string> = new Set(),
     selected = "",
   ): string {
@@ -734,21 +858,22 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
           return `<option value="${escapeHtml(node.guid)}"${chosen}>${escapeHtml(label)}</option>${visit(node.children, depth + 1)}`;
         })
         .join("");
-    return `<option value=""${selected === "" ? " selected" : ""}>No parent (top level)</option>${visit(this.accountsTree(), 0)}`;
+    return `<option value=""${selected === "" ? " selected" : ""}>No parent (top level)</option>${visit(this.accountsTree(bookId), 0)}`;
   }
 
-  private accountByGuid(guid: string): AccountRow | null {
+  private accountByGuid(guid: string, bookId: string): AccountRow | null {
     return (
       this.rows<AccountRow>(
         `SELECT guid, name, account_type, parent_guid, code, hidden, placeholder
-         FROM accounts WHERE guid = ? LIMIT 1`,
+         FROM accounts WHERE guid = ? AND book_id = ? LIMIT 1`,
         guid,
+        bookId,
       )[0] ?? null
     );
   }
 
-  private descendantGuids(guid: string): Set<string> {
-    const rows = this.accountRows();
+  private descendantGuids(guid: string, bookId: string): Set<string> {
+    const rows = this.accountRows(bookId);
     const children = new Map<string, string[]>();
     for (const row of rows) {
       if (row.parent_guid) {
@@ -771,10 +896,11 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     return found;
   }
 
-  private childCount(guid: string): number {
+  private childCount(guid: string, bookId: string): number {
     const row = this.rows<{ count: number }>(
-      "SELECT count(*) AS count FROM accounts WHERE parent_guid = ?",
+      "SELECT count(*) AS count FROM accounts WHERE parent_guid = ? AND book_id = ?",
       guid,
+      bookId,
     )[0];
     return Number(row?.count ?? 0);
   }
@@ -787,7 +913,7 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const account = this.accountByGuid(guid);
+    const account = this.accountByGuid(guid, c.get("bookId"));
     if (!account) return c.text("Account not found", 404);
     return c.html(
       this.appPage(
@@ -800,7 +926,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <label for="type">Type</label>
 <select id="type" name="type">${ACCOUNT_TYPES.map((type) => `<option value="${type}"${type === account.account_type ? " selected" : ""}>${type}</option>`).join("")}</select>
 <label for="parent">Parent</label>
-<select id="parent" name="parent">${this.accountOptions(this.descendantGuids(guid), account.parent_guid ?? "")}</select>
+<select id="parent" name="parent">${this.accountOptions(c.get("bookId"), this.descendantGuids(guid, c.get("bookId")), account.parent_guid ?? "")}</select>
 <label for="code">Code</label>
 <input id="code" name="code" type="text" maxlength="40" value="${escapeHtml(account.code ?? "")}">
 <label for="description">Description</label>
@@ -824,7 +950,8 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const guid = c.req.param("guid") ?? "";
-    const account = guid ? this.accountByGuid(guid) : null;
+    const bookId = c.get("bookId");
+    const account = guid ? this.accountByGuid(guid, bookId) : null;
     if (!account) return c.text("Account not found", 404);
     const body = await c.req.parseBody();
     const name = formValue(body, "name");
@@ -838,7 +965,10 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       );
     }
     if (parent) {
-      if (!this.accountByGuid(parent) || this.descendantGuids(guid).has(parent)) {
+      if (
+        !this.accountByGuid(parent, bookId) ||
+        this.descendantGuids(guid, bookId).has(parent)
+      ) {
         return this.editAccountPage(
           c,
           guid,
@@ -850,7 +980,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       `UPDATE accounts
        SET name = ?, account_type = ?, parent_guid = ?, code = ?,
            description = ?, hidden = ?, placeholder = ?
-       WHERE guid = ?`,
+       WHERE guid = ? AND book_id = ?`,
       name,
       type,
       parent || null,
@@ -859,6 +989,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       body.hidden === "on" ? 1 : 0,
       body.placeholder === "on" ? 1 : 0,
       guid,
+      bookId,
     );
     return c.redirect("/app/accounts");
   }
@@ -869,16 +1000,17 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const guid = c.req.param("guid") ?? "";
-    const account = guid ? this.accountByGuid(guid) : null;
+    const bookId = c.get("bookId");
+    const account = guid ? this.accountByGuid(guid, bookId) : null;
     if (!account) return c.text("Account not found", 404);
-    if (this.childCount(guid) > 0) {
+    if (this.childCount(guid, bookId) > 0) {
       return this.editAccountPage(
         c,
         guid,
         "Move or delete this account's children before deleting it.",
       );
     }
-    deleteAccount(this.sql, guid);
+    deleteAccount(this.sql, guid, bookId);
     return c.redirect("/app/accounts");
   }
 
@@ -886,20 +1018,23 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const balances = this.balanceMap();
-    const rows = this.accountRows();
+    const bookId = c.get("bookId");
+    const book = this.activeBook(c);
+    const balances = this.balanceMap(bookId);
+    const rows = this.accountRows(bookId);
     const totals = bookTotals(rows, balances);
     return c.html(
       this.appPage(
-        "Chart of accounts",
-        `<h1>Chart of accounts</h1>
+        "Accounts",
+        `<h1>Accounts</h1>
+<p class="muted">Company: <strong>${escapeHtml(book.name)}</strong> · Chart of accounts</p>
 <div class="summary">
-<div class="stat accent"><div class="label">Accounts</div><div class="value">${this.accountRows().length}</div></div>
+<div class="stat accent"><div class="label">Accounts</div><div class="value">${rows.length}</div></div>
 <div class="stat green"><div class="label">Net assets</div><div class="value">${formatMoney(totals.netAssets, 100n)}</div></div>
 <div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
 </div>
-<p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a> · <a href="/app/journal">Journal</a> · <a href="/app/import">Import</a> · <a href="/app/export/xml">Export</a></p>
-${this.renderAccountTree(this.accountsTree(), 0, rolledUpTotals(rows, balances))}`,
+<p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a> · <a href="/app/journal">Journal</a> · <a href="/app/books">Books</a> · <a href="/app/import">Import</a> · <a href="/app/export/xml">Export</a></p>
+${this.renderAccountTree(this.accountsTree(bookId), 0, rolledUpTotals(rows, balances))}`,
       ),
       200,
     );
@@ -914,7 +1049,7 @@ ${this.renderAccountTree(this.accountsTree(), 0, rolledUpTotals(rows, balances))
         "Import a book",
         `<h1>Import a GnuCash book</h1>
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
-<p class="muted">Accepts a .gnucash book in SQLite or gzip XML. Importing replaces the accounts and transactions in this hosted book.</p>
+<p class="muted">Accepts a .gnucash book in SQLite or gzip XML. Importing replaces the accounts and transactions in <strong>${escapeHtml(this.activeBook(c).name)}</strong> only.</p>
 <form method="post" action="/app/import" enctype="multipart/form-data">
 <label for="file">Book file</label>
 <input id="file" name="file" type="file" required accept=".gnucash,.sqlite,application/gzip,application/xml">
@@ -944,7 +1079,16 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (snapshot.accounts.length === 0) {
       return this.importPage(c, "The book has no accounts.");
     }
-    replaceBook(this.sql, snapshot, newGuid, nowIso());
+    const bookId = c.get("bookId");
+    replaceBook(this.sql, snapshot, newGuid, nowIso(), bookId);
+    this.sql.exec("UPDATE gcw_books SET template_id = 'imported' WHERE id = ?", bookId);
+    if (snapshot.currencyCode) {
+      this.sql.exec(
+        "UPDATE gcw_books SET currency = ? WHERE id = ?",
+        snapshot.currencyCode,
+        bookId,
+      );
+    }
     return c.redirect("/app/accounts");
   }
 
@@ -953,12 +1097,15 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const tenantId = c.get("tenantId");
-    const accounts = this.accountRows().map((row) => ({
+    const bookId = c.get("bookId");
+    const book = this.activeBook(c);
+    const currency = book.currency;
+    const accounts = this.accountRows(bookId).map((row) => ({
       guid: row.guid,
       name: row.name,
       type: row.account_type,
       parentGuid: row.parent_guid,
-      commodityCode: "USD",
+      commodityCode: currency,
       code: row.code ?? "",
       description: "",
     }));
@@ -967,28 +1114,32 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       account_guid: string;
       value_num: string;
       value_denom: string;
-    }>("SELECT tx_guid, account_guid, value_num, value_denom FROM splits");
+    }>(
+      "SELECT tx_guid, account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
+      bookId,
+    );
     const transactions = this.rows<{
       guid: string;
       post_date: string;
       description: string;
-    }>("SELECT guid, post_date, description FROM transactions ORDER BY post_date").map(
-      (tx) => ({
-        guid: tx.guid,
-        date: tx.post_date.slice(0, 10),
-        description: tx.description,
-        currencyCode: "USD",
-        splits: splitRows
-          .filter((split) => split.tx_guid === tx.guid)
-          .map((split) => ({
-            accountGuid: split.account_guid,
-            value: money(BigInt(split.value_num), BigInt(split.value_denom)),
-          })),
-      }),
-    );
+    }>(
+      "SELECT guid, post_date, description FROM transactions WHERE book_id = ? ORDER BY post_date",
+      bookId,
+    ).map((tx) => ({
+      guid: tx.guid,
+      date: tx.post_date.slice(0, 10),
+      description: tx.description,
+      currencyCode: currency,
+      splits: splitRows
+        .filter((split) => split.tx_guid === tx.guid)
+        .map((split) => ({
+          accountGuid: split.account_guid,
+          value: money(BigInt(split.value_num), BigInt(split.value_denom)),
+        })),
+    }));
     const xml = writeGnuCashXml({
-      bookGuid: (await sha256Hex(tenantId)).slice(0, 32),
-      currencyCode: "USD",
+      bookGuid: (await sha256Hex(`${tenantId}:${bookId}`)).slice(0, 32),
+      currencyCode: currency,
       fraction: 100,
       accounts,
       transactions,
@@ -1001,7 +1152,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     return new Response(gzipped, {
       headers: {
         "content-type": "application/gzip",
-        "content-disposition": `attachment; filename="${tenantId}.gnucash"`,
+        "content-disposition": `attachment; filename="${bookExportFilename(book.name)}"`,
       },
     });
   }
@@ -1010,12 +1161,12 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const accounts = this.accountRows().map((row) => ({
+    const accounts = this.accountRows(c.get("bookId")).map((row) => ({
       guid: row.guid,
       name: row.name,
       account_type: row.account_type,
     }));
-    const splits = this.splitRows();
+    const splits = this.splitRows(c.get("bookId"));
     const trial = trialBalance(accounts, splits);
     const sheet = balanceSheet(accounts, splits);
     const pnl = incomeStatement(accounts, splits);
@@ -1098,16 +1249,23 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const accounts = new Map(this.accountRows().map((row) => [row.guid, row.name]));
+    const bookId = c.get("bookId");
+    const accounts = new Map(
+      this.accountRows(bookId).map((row) => [row.guid, row.name]),
+    );
     const txs = this.rows<{ guid: string; post_date: string; description: string }>(
-      "SELECT guid, post_date, description FROM transactions ORDER BY post_date DESC, guid",
+      "SELECT guid, post_date, description FROM transactions WHERE book_id = ? ORDER BY post_date DESC, guid",
+      bookId,
     );
     const splits = this.rows<{
       tx_guid: string;
       account_guid: string;
       value_num: string;
       value_denom: string;
-    }>("SELECT tx_guid, account_guid, value_num, value_denom FROM splits");
+    }>(
+      "SELECT tx_guid, account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
+      bookId,
+    );
     const items = txs
       .map((tx) => {
         const rows = splits
@@ -1136,7 +1294,7 @@ ${items || `<p class="muted">No transactions yet.</p>`}`,
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const options = this.accountRows()
+    const options = this.accountRows(c.get("bookId"))
       .filter((row) => !row.placeholder)
       .map(
         (row) =>
@@ -1178,7 +1336,8 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const from = formValue(body, "from");
     const to = formValue(body, "to");
     const amountText = formValue(body, "amount");
-    const accounts = new Set(this.accountRows().map((row) => row.guid));
+    const bookId = c.get("bookId");
+    const accounts = new Set(this.accountRows(bookId).map((row) => row.guid));
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return this.newTransactionPage(c, "Enter a valid date.");
     }
@@ -1199,8 +1358,9 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     }
     const txGuid = newGuid();
     this.sql.exec(
-      "INSERT INTO transactions (guid, currency_guid, post_date, description, created_at) VALUES (?, NULL, ?, ?, ?)",
+      "INSERT INTO transactions (guid, book_id, currency_guid, post_date, description, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
       txGuid,
+      bookId,
       date,
       description,
       nowIso(),
@@ -1210,8 +1370,9 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       [to, money(-amount.num, amount.denom)],
     ] as const) {
       this.sql.exec(
-        "INSERT INTO splits (guid, tx_guid, account_guid, value_num, value_denom) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO splits (guid, book_id, tx_guid, account_guid, value_num, value_denom) VALUES (?, ?, ?, ?, ?, ?)",
         newGuid(),
+        bookId,
         txGuid,
         account,
         value.num.toString(),
@@ -1236,7 +1397,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <label for="type">Type</label>
 <select id="type" name="type">${ACCOUNT_TYPES.map((type) => `<option value="${type}">${type}</option>`).join("")}</select>
 <label for="parent">Parent</label>
-<select id="parent" name="parent">${this.accountOptions()}</select>
+<select id="parent" name="parent">${this.accountOptions(c.get("bookId"))}</select>
 <button type="submit">Add account</button>
 </form>
 <p><a href="/app/accounts">Cancel</a></p>`,
@@ -1254,18 +1415,20 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const name = formValue(body, "name");
     const type = formValue(body, "type");
     const parent = formValue(body, "parent");
+    const bookId = c.get("bookId");
     if (!name || name.length > 200 || !ACCOUNT_TYPES.includes(type as AccountType)) {
       return this.newAccountPage(c, "Enter a name and choose a valid account type.");
     }
-    if (parent && !this.accountRows().some((row) => row.guid === parent)) {
+    if (parent && !this.accountRows(bookId).some((row) => row.guid === parent)) {
       return this.newAccountPage(c, "The selected parent no longer exists.");
     }
     this.sql.exec(
       `INSERT INTO accounts
-       (guid, name, account_type, commodity_guid, parent_guid, code,
+       (guid, book_id, name, account_type, commodity_guid, parent_guid, code,
         description, hidden, placeholder, created_at)
-       VALUES (?, ?, ?, NULL, ?, NULL, NULL, 0, 0, ?)`,
+       VALUES (?, ?, ?, ?, NULL, ?, NULL, NULL, 0, 0, ?)`,
       newGuid(),
+      bookId,
       name,
       type,
       parent || null,
@@ -1279,11 +1442,136 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       title,
       `<header class="appbar">
 <a class="brand" href="/app">Saldima</a>
-<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/reports">Reports</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/reports">Reports</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
     );
+  }
+
+  private async booksPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const activeId = c.get("bookId");
+    const books = this.bookRows();
+    const rows = books
+      .map((book) => {
+        const active = book.id === activeId;
+        return `<li class="card" style="margin-bottom:1rem" data-book-id="${escapeHtml(book.id)}">
+<strong>${escapeHtml(book.name)}</strong>${active ? ` <span class="chip">Active</span>` : ""}
+<p class="muted">${escapeHtml(templateLabel(book.template_id))} · ${escapeHtml(book.currency)} · created ${escapeHtml(book.created_at.slice(0, 10))}</p>
+<form method="post" action="/app/books/${escapeHtml(book.id)}/select"><button type="submit" class="secondary">Select</button></form>
+<form method="post" action="/app/books/${escapeHtml(book.id)}/delete"><button type="submit" class="danger">Delete</button></form>
+</li>`;
+      })
+      .join("");
+    return c.html(
+      this.appPage(
+        "Books",
+        `<h1>Books</h1>
+<p class="muted">Each book is one company, like a GnuCash file. Importing or exporting touches only the active company.</p>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<ul style="list-style:none;padding:0">${rows}</ul>
+<div class="card">
+<h2 style="margin-top:0">New company</h2>
+<form method="post" action="/app/books">
+<label for="book-name">Company name</label>
+<input id="book-name" name="name" type="text" required maxlength="200">
+<label for="book-template">Chart of accounts</label>
+<select id="book-template" name="template">
+${TEMPLATE_IDS.map((id) => `<option value="${id}">${escapeHtml(templateById(id).name)}</option>`).join("")}
+</select>
+<label for="book-currency">Currency</label>
+<select id="book-currency" name="currency">
+${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join("")}
+</select>
+<button type="submit">Create company</button>
+</form>
+</div>`,
+      ),
+      200,
+    );
+  }
+
+  private async createBook(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    const template = formValue(body, "template");
+    const currency = normaliseCurrency(formValue(body, "currency"));
+    if (!name || name.length > 200) {
+      return this.booksPage(c, "Enter a company name.");
+    }
+    if (!isTemplateId(template)) {
+      return this.booksPage(c, "Choose a chart of accounts.");
+    }
+    if (!currency) {
+      return this.booksPage(c, "Choose a three-letter currency.");
+    }
+    const id = newGuid();
+    this.sql.exec(
+      `INSERT INTO gcw_books (id, name, template_id, currency, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      id,
+      name,
+      template,
+      currency,
+      nowIso(),
+    );
+    this.seedAccounts(templateById(template), id);
+    const secure = new URL(c.req.url).protocol === "https:";
+    c.header("Set-Cookie", bookCookie(id, secure));
+    return c.redirect("/app/accounts");
+  }
+
+  private async selectBook(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const id = c.req.param("id") ?? "";
+    if (!id || !this.bookById(id)) return c.text("Company not found", 404);
+    const secure = new URL(c.req.url).protocol === "https:";
+    c.header("Set-Cookie", bookCookie(id, secure));
+    return c.redirect("/app/accounts");
+  }
+
+  private async renameBook(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const id = c.req.param("id") ?? "";
+    if (!id || !this.bookById(id)) return c.text("Company not found", 404);
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    if (!name || name.length > 200) {
+      return this.booksPage(c, "Enter a company name.");
+    }
+    this.sql.exec("UPDATE gcw_books SET name = ? WHERE id = ?", name, id);
+    return c.redirect("/app/settings");
+  }
+
+  private async deleteBook(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const id = c.req.param("id") ?? "";
+    if (!id || !this.bookById(id)) return c.text("Company not found", 404);
+    if (this.bookCount() <= 1) {
+      return c.text("Keep at least one company.", 409);
+    }
+    deleteBook(this.sql, id);
+    if (c.get("bookId") === id) {
+      const secure = new URL(c.req.url).protocol === "https:";
+      c.header("Set-Cookie", clearedBookCookie(secure));
+    }
+    return c.redirect("/app/books");
   }
 
   private async settingsPage(c: BookContext): Promise<Response> {
@@ -1292,12 +1580,19 @@ ${body}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const user = this.userById(session.user_id);
     if (!user) return c.redirect("/app/login");
+    const book = this.activeBook(c);
     return c.html(
       this.appPage(
         "Settings",
         `<h1>Settings</h1>
 <p class="muted">Book ${escapeHtml(c.get("tenantId"))}</p>
 <p>Signed in as <strong>${escapeHtml(user.email)}</strong> (${escapeHtml(user.role)}).</p>
+<p>Active company: <strong>${escapeHtml(book.name)}</strong> · ${escapeHtml(templateLabel(book.template_id))} · ${escapeHtml(book.currency)}</p>
+<form method="post" action="/app/books/${escapeHtml(book.id)}/rename">
+<label for="book-name">Rename company</label>
+<input id="book-name" name="name" type="text" required maxlength="200" value="${escapeHtml(book.name)}">
+<button type="submit" class="secondary">Rename company</button>
+</form>
 <p>Two-factor authentication is enabled.</p>
 <form method="post" action="/app/logout"><button type="submit">Sign out</button></form>`,
       ),
@@ -1311,16 +1606,16 @@ ${body}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const user = this.userById(session.user_id);
     if (!user) return c.redirect("/app/login");
-    const balances = this.balanceMap();
-    const rows = this.accountRows();
+    const balances = this.balanceMap(c.get("bookId"));
+    const rows = this.accountRows(c.get("bookId"));
     const totals = bookTotals(rows, balances);
     return c.html(
       this.appPage(
-        "Book",
+        "Books",
         `<h1>Your books</h1>
-<p class="muted">${escapeHtml(user.email)} · ${escapeHtml(user.role)} · ${escapeHtml(c.get("tenantId"))}</p>
+<p class="muted">${escapeHtml(user.email)} · ${escapeHtml(user.role)} · ${escapeHtml(c.get("tenantId"))} · Company: <strong>${escapeHtml(this.activeBook(c).name)}</strong></p>
 <div class="summary">
-<div class="stat accent"><div class="label">Accounts</div><div class="value">${this.accountRows().length}</div></div>
+<div class="stat accent"><div class="label">Accounts</div><div class="value">${rows.length}</div></div>
 <div class="stat green"><div class="label">Net assets</div><div class="value">${formatMoney(totals.netAssets, 100n)}</div></div>
 <div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
 </div>

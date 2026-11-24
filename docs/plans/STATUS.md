@@ -7,40 +7,41 @@ iOS: `saldima-ios/docs/plans/P1-MOBILE.md`.
 
 ## Where each track stands
 
-| Capability                                          | Web                  | iOS                    | Android                 |
-| --------------------------------------------------- | -------------------- | ---------------------- | ----------------------- |
-| Exact money, posting rules, TB/BS/P&L, verifyLedger | yes                  | yes                    | core yes                |
-| Read GnuCash XML                                    | yes                  | yes                    | yes                     |
-| Read GnuCash SQLite                                 | yes (Worker parser)  | yes                    | yes (row port)          |
-| Import a book                                       | both formats         | file picker            | system picker           |
-| Write / post                                        | post; XML export     | post into SQLite       | post into SQLite        |
-| Journal / register                                  | General Journal page | Register tab           | Register tab            |
-| Rolled account totals, net assets, profit           | yes                  | yes                    | yes                     |
-| Reports                                             | yes                  | yes                    | yes                     |
-| Help topics                                         | yes                  | yes                    | yes                     |
-| Multiple companies                                  | **no — see below**   | yes (library + wizard) | yes (switcher)          |
-| QIF / CSV / OFX import                              | no                   | no                     | no                      |
-| XML export on mobile                                | n/a                  | no                     | no                      |
-| Supporter one-time purchase                         | n/a                  | StoreKit               | Play adapter            |
-| Design theme                                        | yes                  | yes (accent palette)   | yes (Material 3 indigo) |
-| Auth, billing, TOTP, tenant routing                 | yes                  | n/a                    | n/a                     |
+| Capability                                          | Web                      | iOS                    | Android                 |
+| --------------------------------------------------- | ------------------------ | ---------------------- | ----------------------- |
+| Exact money, posting rules, TB/BS/P&L, verifyLedger | yes                      | yes                    | core yes                |
+| Read GnuCash XML                                    | yes                      | yes                    | yes                     |
+| Read GnuCash SQLite                                 | yes (Worker parser)      | yes                    | yes (row port)          |
+| Import a book                                       | both formats             | file picker            | system picker           |
+| Write / post                                        | post; XML export         | post into SQLite       | post into SQLite        |
+| Journal / register                                  | General Journal page     | Register tab           | Register tab            |
+| Rolled account totals, net assets, profit           | yes                      | yes                    | yes                     |
+| Reports                                             | yes                      | yes                    | yes                     |
+| Help topics                                         | yes                      | yes                    | yes                     |
+| Multiple companies                                  | yes (library + switcher) | yes (library + wizard) | yes (switcher)          |
+| QIF / CSV / OFX import                              | no                       | no                     | no                      |
+| XML export on mobile                                | n/a                      | no                     | no                      |
+| Supporter one-time purchase                         | n/a                      | StoreKit               | Play adapter            |
+| Design theme                                        | yes                      | yes (accent palette)   | yes (Material 3 indigo) |
+| Auth, billing, TOTP, tenant routing                 | yes                      | n/a                    | n/a                     |
 
 Deployed: web dev auto-deploys every merge. iOS releases every owner-authored
 merge to TestFlight (latest build 24). Android builds on CI; Play Console still
 awaits owner approval.
 
-## The one deliberate gap: web multi-company
+## Web multi-company landed
 
-Full migration plan: `docs/plans/web-multi-company.md`. Do not improvise it:
-every query must be scoped by `book_id` or companies will silently mix.
+The migration in `docs/plans/web-multi-company.md` is implemented: several
+companies per tenant, each book scoped by `book_id`, with import/export touching
+only the active company. Every query is scoped, and the workerd suite proves two
+books cannot leak into each other.
 
 ## Next work, in order
 
-1. Web multi-company migration (5 steps + tests in the plan file).
-2. QIF/CSV/OFX import with mapping + duplicate detection; XML export on mobile.
-3. 100 industry templates and country overlays (`P2.md` track 2).
-4. GnuCash locale set with machine-marked translations (`P2.md` track 3).
-5. Interface parity remainders: register columns/reconcile, report options,
+1. QIF/CSV/OFX import with mapping + duplicate detection; XML export on mobile.
+2. 100 industry templates and country overlays (`P2.md` track 2).
+3. GnuCash locale set with machine-marked translations (`P2.md` track 3).
+4. Interface parity remainders: register columns/reconcile, report options,
    keyboard shortcuts, Actions/Business/Tools menus.
 
 ## Resuming

@@ -3,11 +3,15 @@ import { expect, test } from "@playwright/test";
 
 test("alice and bob are isolated tenants", async ({ page }) => {
   await page.goto("http://alice.localhost:8789/");
-  await expect(page.getByRole("heading", { name: "Saldima" })).toBeVisible();
-  await expect(page.locator("body")).toHaveAttribute("data-tenant", "tenant-alice");
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  const aliceBook = (await page.locator("main p").first().textContent()) ?? "";
+  expect(aliceBook).toMatch(/^Book /);
 
   await page.goto("http://bob.localhost:8789/");
-  await expect(page.locator("body")).toHaveAttribute("data-tenant", "tenant-bob");
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  const bobBook = (await page.locator("main p").first().textContent()) ?? "";
+  expect(bobBook).toMatch(/^Book /);
+  expect(bobBook).not.toBe(aliceBook);
 });
 
 test("health reports the resolved tenant", async ({ request }) => {

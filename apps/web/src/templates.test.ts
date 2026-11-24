@@ -6,6 +6,7 @@ import {
   isTemplateId,
   TEMPLATE_IDS,
   templateById,
+  templateLabel,
 } from "./templates.ts";
 
 const ALLOWED = new Set([
@@ -28,6 +29,8 @@ describe("book templates", () => {
     expect(isTemplateId("nope")).toBe(false);
     expect(templateById(undefined).id).toBe("personal");
     expect(templateById("nope").id).toBe("personal");
+    expect(templateLabel("small-business")).toBe("Small business");
+    expect(templateLabel("imported")).toBe("Imported");
   });
 
   it("has unique paths and allowed account types in every template", () => {
