@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+export * from "./book-file.ts";
 export * from "./guid.ts";
 export * from "./ledger.ts";
 export * from "./money.ts";
