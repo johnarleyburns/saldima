@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { newGuid } from "@saldima/gnucash";
+import {
+  equalsMoney,
+  formatMoney,
+  type Money,
+  money,
+  newGuid,
+  parseMoneyHalfUp,
+} from "@saldima/gnucash";
 import { type Context, Hono } from "hono";
 
 import {
@@ -21,6 +28,7 @@ import {
   verifyPassword,
   verifyTotp,
 } from "./auth.ts";
+import { bookTotals, sumSplitBalances } from "./balances.ts";
 import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
 import { designCss } from "./design.ts";
@@ -196,6 +204,24 @@ export class Book {
         created_at TEXT NOT NULL
       )`,
     );
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS transactions (
+        guid TEXT PRIMARY KEY,
+        currency_guid TEXT,
+        post_date TEXT NOT NULL,
+        description TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+    );
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS splits (
+        guid TEXT PRIMARY KEY,
+        tx_guid TEXT NOT NULL,
+        account_guid TEXT NOT NULL,
+        value_num TEXT NOT NULL,
+        value_denom TEXT NOT NULL
+      )`,
+    );
   }
 
   private buildApp(): BookApp {
@@ -236,6 +262,9 @@ export class Book {
     );
     app.post("/app/accounts/:guid", (c) => this.updateAccount(c));
     app.post("/app/accounts/:guid/delete", (c) => this.deleteAccount(c));
+    app.get("/app/journal", (c) => this.journalPage(c));
+    app.get("/app/journal/new", (c) => this.newTransactionPage(c));
+    app.post("/app/journal", (c) => this.createTransaction(c));
     app.get("/app/security/totp", (c) => this.totpPage(c));
     app.post("/app/security/totp", (c) => this.totp(c));
     return app;
@@ -591,6 +620,19 @@ ${setupBlock}
     );
   }
 
+  private splitRows(): Array<{ accountGuid: string; value: Money }> {
+    return this.rows<{ account_guid: string; value_num: string; value_denom: string }>(
+      "SELECT account_guid, value_num, value_denom FROM splits",
+    ).map((row) => ({
+      accountGuid: row.account_guid,
+      value: money(BigInt(row.value_num), BigInt(row.value_denom)),
+    }));
+  }
+
+  private balanceMap(): Map<string, Money> {
+    return sumSplitBalances(this.splitRows());
+  }
+
   private seedAccounts(template: BookTemplate): void {
     const guids = new Map<string, string>();
     for (const row of flattenTemplate(template)) {
@@ -636,7 +678,11 @@ ${setupBlock}
     return roots;
   }
 
-  private renderAccountTree(nodes: AccountNode[], depth = 0): string {
+  private renderAccountTree(
+    nodes: AccountNode[],
+    depth = 0,
+    balances: ReadonlyMap<string, Money> = new Map(),
+  ): string {
     if (nodes.length === 0) return `<p class="muted">No accounts yet.</p>`;
     const items = nodes
       .map((node) => {
@@ -646,15 +692,17 @@ ${setupBlock}
         ]
           .filter(Boolean)
           .join(" · ");
+        const balance = balances.get(node.guid);
+        const amount = balance ? formatMoney(balance, 100n) : "0.00";
         const row = `<a href="/app/accounts/${escapeHtml(node.guid)}/edit"><strong>${escapeHtml(node.name)}</strong></a>
-<span class="chip type-${escapeHtml(node.account_type.toLowerCase())}">${escapeHtml(typeLabel(node.account_type))}</span>${flags ? `<span class="muted">${flags}</span>` : ""}`;
+<span class="chip type-${escapeHtml(node.account_type.toLowerCase())}">${escapeHtml(typeLabel(node.account_type))}</span>${flags ? `<span class="muted">${flags}</span>` : ""}<span class="amount">${amount}</span>`;
         const open = `<li data-account-guid="${escapeHtml(node.guid)}" data-account-name="${escapeHtml(node.name)}">
 ${row}
-${this.renderAccountTree(node.children, depth + 1)}
+${this.renderAccountTree(node.children, depth + 1, balances)}
 </li>`;
         const folded = `<li data-account-guid="${escapeHtml(node.guid)}" data-account-name="${escapeHtml(node.name)}">
 <details open><summary>${row}</summary>
-${this.renderAccountTree(node.children, depth + 1)}
+${this.renderAccountTree(node.children, depth + 1, balances)}
 </details>
 </li>`;
         return node.children.length === 0 ? open : folded;
@@ -828,15 +876,149 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const balances = this.balanceMap();
+    const totals = bookTotals(this.accountRows(), balances);
     return c.html(
       this.appPage(
         "Chart of accounts",
         `<h1>Chart of accounts</h1>
-<p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a></p>
-${this.renderAccountTree(this.accountsTree())}`,
+<div class="summary">
+<div class="stat accent"><div class="label">Accounts</div><div class="value">${this.accountRows().length}</div></div>
+<div class="stat green"><div class="label">Net assets</div><div class="value">${formatMoney(totals.netAssets, 100n)}</div></div>
+<div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
+</div>
+<p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a> · <a href="/app/journal">Journal</a></p>
+${this.renderAccountTree(this.accountsTree(), 0, balances)}`,
       ),
       200,
     );
+  }
+
+  private async journalPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const accounts = new Map(this.accountRows().map((row) => [row.guid, row.name]));
+    const txs = this.rows<{ guid: string; post_date: string; description: string }>(
+      "SELECT guid, post_date, description FROM transactions ORDER BY post_date DESC, guid",
+    );
+    const splits = this.rows<{
+      tx_guid: string;
+      account_guid: string;
+      value_num: string;
+      value_denom: string;
+    }>("SELECT tx_guid, account_guid, value_num, value_denom FROM splits");
+    const items = txs
+      .map((tx) => {
+        const rows = splits
+          .filter((split) => split.tx_guid === tx.guid)
+          .map(
+            (split) =>
+              `<li><span>${escapeHtml(accounts.get(split.account_guid) ?? "?")}</span><span class="amount">${formatMoney(money(BigInt(split.value_num), BigInt(split.value_denom)), 100n)}</span></li>`,
+          )
+          .join("");
+        return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}</h2><p class="muted">${escapeHtml(tx.post_date)}</p><ul class="journal">${rows}</ul></div>`;
+      })
+      .join("");
+    return c.html(
+      this.appPage(
+        "General Journal",
+        `<h1>General Journal</h1>
+<p class="muted">Every transaction in this book, like Tools → General Journal.</p>
+<p><a href="/app/journal/new" class="cta">New transaction</a></p>
+${items || `<p class="muted">No transactions yet.</p>`}`,
+      ),
+      200,
+    );
+  }
+
+  private async newTransactionPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const options = this.accountRows()
+      .filter((row) => !row.placeholder)
+      .map(
+        (row) =>
+          `<option value="${escapeHtml(row.guid)}">${escapeHtml(row.name)}</option>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "New transaction",
+        `<h1>New transaction</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/journal">
+<label for="date">Date</label>
+<input id="date" name="date" type="date" required value="${nowIso().slice(0, 10)}">
+<label for="description">Description</label>
+<input id="description" name="description" type="text" required maxlength="200">
+<label for="from">From account</label>
+<select id="from" name="from" required>${options}</select>
+<label for="to">To account</label>
+<select id="to" name="to" required>${options}</select>
+<label for="amount">Amount</label>
+<input id="amount" name="amount" inputmode="decimal" required placeholder="12.34">
+<button type="submit">Post transaction</button>
+</form>
+<p><a href="/app/journal">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async createTransaction(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const date = formValue(body, "date");
+    const description = formValue(body, "description");
+    const from = formValue(body, "from");
+    const to = formValue(body, "to");
+    const amountText = formValue(body, "amount");
+    const accounts = new Set(this.accountRows().map((row) => row.guid));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return this.newTransactionPage(c, "Enter a valid date.");
+    }
+    if (!description || description.length > 200) {
+      return this.newTransactionPage(c, "Enter a description.");
+    }
+    if (!accounts.has(from) || !accounts.has(to) || from === to) {
+      return this.newTransactionPage(c, "Choose two different accounts.");
+    }
+    let amount: Money;
+    try {
+      amount = parseMoneyHalfUp(amountText, 100n);
+    } catch {
+      return this.newTransactionPage(c, "Enter an amount like 12.34.");
+    }
+    if (equalsMoney(amount, money(0n))) {
+      return this.newTransactionPage(c, "The amount must not be zero.");
+    }
+    const txGuid = newGuid();
+    this.sql.exec(
+      "INSERT INTO transactions (guid, currency_guid, post_date, description, created_at) VALUES (?, NULL, ?, ?, ?)",
+      txGuid,
+      date,
+      description,
+      nowIso(),
+    );
+    for (const [account, value] of [
+      [from, amount],
+      [to, money(-amount.num, amount.denom)],
+    ] as const) {
+      this.sql.exec(
+        "INSERT INTO splits (guid, tx_guid, account_guid, value_num, value_denom) VALUES (?, ?, ?, ?, ?)",
+        newGuid(),
+        txGuid,
+        account,
+        value.num.toString(),
+        value.denom.toString(),
+      );
+    }
+    return c.redirect("/app/journal");
   }
 
   private async newAccountPage(c: BookContext, error = ""): Promise<Response> {
@@ -897,7 +1079,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       title,
       `<header class="appbar">
 <a class="brand" href="/app">Saldima</a>
-<nav><a href="/app/accounts">Accounts</a><a href="/app/settings">Settings</a></nav>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
