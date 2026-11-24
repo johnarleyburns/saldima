@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import {
+  addMoney,
   equalsMoney,
   formatMoney,
   type Money,
@@ -33,6 +34,7 @@ import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
 import { designCss } from "./design.ts";
 import { totpQrSvg } from "./qr.ts";
+import { balanceSheet, incomeStatement, trialBalance } from "./reports.ts";
 import {
   ACCOUNT_TYPES,
   type AccountType,
@@ -262,6 +264,8 @@ export class Book {
     );
     app.post("/app/accounts/:guid", (c) => this.updateAccount(c));
     app.post("/app/accounts/:guid/delete", (c) => this.deleteAccount(c));
+    app.get("/app/reports", (c) => this.reportsPage(c));
+    app.get("/app/help", (c) => this.helpPage(c));
     app.get("/app/journal", (c) => this.journalPage(c));
     app.get("/app/journal/new", (c) => this.newTransactionPage(c));
     app.post("/app/journal", (c) => this.createTransaction(c));
@@ -894,6 +898,94 @@ ${this.renderAccountTree(this.accountsTree(), 0, balances)}`,
     );
   }
 
+  private async reportsPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const accounts = this.accountRows().map((row) => ({
+      guid: row.guid,
+      name: row.name,
+      account_type: row.account_type,
+    }));
+    const splits = this.splitRows();
+    const trial = trialBalance(accounts, splits);
+    const sheet = balanceSheet(accounts, splits);
+    const pnl = incomeStatement(accounts, splits);
+    const trialRows = trial.rows
+      .map(
+        (row) =>
+          `<li><span>${escapeHtml(row.name)} <span class="chip type-${escapeHtml(row.type.toLowerCase())}">${escapeHtml(typeLabel(row.type))}</span></span><span class="amount">${formatMoney(row.debit.num === 0n ? row.credit : row.debit, 100n)}</span></li>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "Reports",
+        `<h1>Reports</h1>
+<p class="muted">Same reports and kernel as the apps. Amounts are half-even for display.</p>
+<div class="summary">
+<div class="stat accent"><div class="label">Net assets</div><div class="value">${formatMoney(sheet.assets, 100n)}</div></div>
+<div class="stat green"><div class="label">Profit</div><div class="value">${formatMoney(pnl.netIncome, 100n)}</div></div>
+<div class="stat blue"><div class="label">Trial balance</div><div class="value">${trial.balanced ? "Balanced" : "Out"}</div></div>
+</div>
+<div class="card"><h2 style="margin-top:0">Trial balance</h2><ul class="journal">${trialRows || `<li><span class="muted">No postings yet.</span></li>`}</ul></div>
+<div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Balance sheet</h2>
+<ul class="journal">
+<li><span>Assets</span><span class="amount">${formatMoney(sheet.assets, 100n)}</span></li>
+<li><span>Liabilities</span><span class="amount">${formatMoney(sheet.liabilities, 100n)}</span></li>
+<li><span>Equity</span><span class="amount">${formatMoney(addMoney(sheet.equity, sheet.retainedEarnings), 100n)}</span></li>
+</ul></div>
+<div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Profit &amp; loss</h2>
+<ul class="journal">
+<li><span>Revenue</span><span class="amount">${formatMoney(pnl.revenue, 100n)}</span></li>
+<li><span>Expenses</span><span class="amount">${formatMoney(pnl.expenses, 100n)}</span></li>
+<li><span><strong>Net income</strong></span><span class="amount"><strong>${formatMoney(pnl.netIncome, 100n)}</strong></span></li>
+</ul></div>`,
+      ),
+      200,
+    );
+  }
+
+  private async helpPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const topics: Array<[string, string]> = [
+      [
+        "Getting started",
+        "Create a book from a template, pick the currency and add your first bank account. Everything is stored in a file you own.",
+      ],
+      [
+        "Accounts",
+        "The chart of accounts is a tree. Fold branches with the triangles; placeholder accounts group children and cannot receive postings.",
+      ],
+      [
+        "Journal and register",
+        "Post a balanced entry from the Journal. Every split keeps an exact fraction, and the accounts update immediately.",
+      ],
+      [
+        "Reports",
+        "Trial balance, balance sheet and profit and loss all read the same posted splits. Change the date range when reports gain options.",
+      ],
+      [
+        "Compatible with GnuCash",
+        "SQLite and gzip XML books use the desktop schema. Amounts are rationals; posting normalises half-up and display rounds half-even.",
+      ],
+      [
+        "Settings and security",
+        "Two-factor authentication protects the hosted book. Preferences and appearance live in Settings.",
+      ],
+    ];
+    return c.html(
+      this.appPage(
+        "Help",
+        `<h1>Help</h1>
+<p class="muted">The same chapter structure as the desktop manual, written for this app.</p>
+${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h2 style="margin-top:0">${escapeHtml(title)}</h2><p class="muted">${escapeHtml(body)}</p></div>`).join("")}`,
+      ),
+      200,
+    );
+  }
+
   private async journalPage(c: BookContext): Promise<Response> {
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
@@ -1079,7 +1171,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       title,
       `<header class="appbar">
 <a class="brand" href="/app">Saldima</a>
-<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/settings">Settings</a></nav>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/reports">Reports</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
