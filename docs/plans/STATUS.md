@@ -26,7 +26,7 @@ iOS: `saldima-ios/docs/plans/P1-MOBILE.md`.
 | Auth, billing, TOTP, tenant routing                 | yes                      | n/a                    | n/a                     |
 
 Deployed: web dev auto-deploys every merge. iOS releases every owner-authored
-merge to TestFlight (latest build 24). Android builds on CI; Play Console still
+merge to TestFlight (latest build 26). Android builds on CI; Play Console still
 awaits owner approval.
 
 ## Web multi-company landed
@@ -38,7 +38,7 @@ books cannot leak into each other.
 
 ## Next work, in order
 
-1. XML export on mobile; QIF/CSV export on web (remaining #52).
+1. QIF/CSV export on web (remaining #52).
 2. 100 industry templates and country overlays (`P2.md` track 2).
 3. GnuCash locale set with machine-marked translations (`P2.md` track 3).
 4. Interface parity remainders: register columns/reconcile, report options,
