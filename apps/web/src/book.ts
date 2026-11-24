@@ -31,7 +31,7 @@ import {
   verifyPassword,
   verifyTotp,
 } from "./auth.ts";
-import { bookTotals, sumSplitBalances } from "./balances.ts";
+import { bookTotals, rolledUpTotals, sumSplitBalances } from "./balances.ts";
 import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
 import { replaceBook } from "./data-access/book-import.ts";
@@ -887,7 +887,8 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const balances = this.balanceMap();
-    const totals = bookTotals(this.accountRows(), balances);
+    const rows = this.accountRows();
+    const totals = bookTotals(rows, balances);
     return c.html(
       this.appPage(
         "Chart of accounts",
@@ -898,7 +899,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
 </div>
 <p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a> · <a href="/app/journal">Journal</a> · <a href="/app/import">Import</a> · <a href="/app/export/xml">Export</a></p>
-${this.renderAccountTree(this.accountsTree(), 0, balances)}`,
+${this.renderAccountTree(this.accountsTree(), 0, rolledUpTotals(rows, balances))}`,
       ),
       200,
     );
@@ -1311,7 +1312,8 @@ ${body}
     const user = this.userById(session.user_id);
     if (!user) return c.redirect("/app/login");
     const balances = this.balanceMap();
-    const totals = bookTotals(this.accountRows(), balances);
+    const rows = this.accountRows();
+    const totals = bookTotals(rows, balances);
     return c.html(
       this.appPage(
         "Book",

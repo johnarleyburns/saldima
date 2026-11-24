@@ -31,6 +31,31 @@ export function sumSplitBalances(splits: readonly SplitAmount[]): Map<string, Mo
   return balances;
 }
 
+/** Parent rows show their own balance plus every descendant, like GnuCash's Total. */
+export function rolledUpTotals(
+  accounts: readonly (AccountTypeRow & { readonly parent_guid: string | null })[],
+  balances: ReadonlyMap<string, Money>,
+): Map<string, Money> {
+  const children = new Map<string, string[]>();
+  for (const account of accounts) {
+    if (!account.parent_guid) continue;
+    const list = children.get(account.parent_guid) ?? [];
+    list.push(account.guid);
+    children.set(account.parent_guid, list);
+  }
+  const totals = new Map<string, Money>();
+  const visit = (guid: string): Money => {
+    const known = totals.get(guid);
+    if (known) return known;
+    let total = balances.get(guid) ?? money(0n);
+    for (const child of children.get(guid) ?? []) total = addMoney(total, visit(child));
+    totals.set(guid, total);
+    return total;
+  };
+  for (const account of accounts) visit(account.guid);
+  return totals;
+}
+
 const ASSET_TYPES = new Set(["ASSET", "BANK", "CASH", "RECEIVABLE"]);
 const LIABILITY_TYPES = new Set(["LIABILITY", "CREDIT", "PAYABLE"]);
 

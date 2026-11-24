@@ -2,7 +2,7 @@
 
 import { equalsMoney, money } from "@saldima/gnucash";
 import { describe, expect, it } from "vitest";
-import { bookTotals, sumSplitBalances } from "./balances";
+import { bookTotals, rolledUpTotals, sumSplitBalances } from "./balances";
 
 describe("account balances", () => {
   it("sums split values per account exactly", () => {
@@ -15,6 +15,29 @@ describe("account balances", () => {
     const salary = balances.get("salary");
     expect(bank && equalsMoney(bank, money(7_499n, 3n))).toBe(true);
     expect(salary && equalsMoney(salary, money(-250_000n, 100n))).toBe(true);
+  });
+
+  it("rolls child balances into parents", () => {
+    const accounts = [
+      { guid: "assets", account_type: "ASSET", parent_guid: null },
+      { guid: "bank", account_type: "BANK", parent_guid: "assets" },
+      { guid: "checking", account_type: "BANK", parent_guid: "bank" },
+      { guid: "card", account_type: "CREDIT", parent_guid: "liabilities" },
+    ];
+    const balances = sumSplitBalances([
+      { accountGuid: "checking", value: money(100_000n, 100n) },
+      { accountGuid: "card", value: money(-20_000n, 100n) },
+    ]);
+    const totals = rolledUpTotals(accounts, balances);
+    expect(equalsMoney(totals.get("assets") ?? money(0n), money(100_000n, 100n))).toBe(
+      true,
+    );
+    expect(equalsMoney(totals.get("bank") ?? money(0n), money(100_000n, 100n))).toBe(
+      true,
+    );
+    expect(equalsMoney(totals.get("card") ?? money(0n), money(-20_000n, 100n))).toBe(
+      true,
+    );
   });
 
   it("computes net assets and profit like the apps", () => {
