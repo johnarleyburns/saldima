@@ -34,6 +34,11 @@ import {
 } from "./templates.ts";
 import { epochMs, isoAfterSeconds, nowIso } from "./time/system-clock.ts";
 
+/** GnuCash shows "Bank", not "BANK"; keep the wire format uppercase. */
+function typeLabel(type: string): string {
+  return type.charAt(0) + type.slice(1).toLowerCase();
+}
+
 export interface BookEnv {
   ENVIRONMENT?: string;
   SETUP_TOKEN?: string;
@@ -662,11 +667,18 @@ ${setupBlock}
         ]
           .filter(Boolean)
           .join(" · ");
-        return `<li data-account-guid="${escapeHtml(node.guid)}" data-account-name="${escapeHtml(node.name)}">
-<a href="/app/accounts/${escapeHtml(node.guid)}/edit"><strong>${escapeHtml(node.name)}</strong></a>
-<span class="muted">${escapeHtml(node.account_type)}${flags ? ` · ${flags}` : ""}</span>
+        const row = `<a href="/app/accounts/${escapeHtml(node.guid)}/edit"><strong>${escapeHtml(node.name)}</strong></a>
+<span class="muted">${escapeHtml(typeLabel(node.account_type))}${flags ? ` · ${flags}` : ""}</span>`;
+        const open = `<li data-account-guid="${escapeHtml(node.guid)}" data-account-name="${escapeHtml(node.name)}">
+${row}
 ${this.renderAccountTree(node.children, depth + 1)}
 </li>`;
+        const folded = `<li data-account-guid="${escapeHtml(node.guid)}" data-account-name="${escapeHtml(node.name)}">
+<details open><summary>${row}</summary>
+${this.renderAccountTree(node.children, depth + 1)}
+</details>
+</li>`;
+        return node.children.length === 0 ? open : folded;
       })
       .join("");
     return `<ul class="accounts">${items}</ul>`;
@@ -944,7 +956,8 @@ ${body}
         `<h1>Saldima</h1>
 <p class="muted">Book ${escapeHtml(c.get("tenantId"))}</p>
 <p>Signed in as <strong>${escapeHtml(user.email)}</strong> (${escapeHtml(user.role)}).</p>
-<p><a href="/app/accounts">Chart of accounts (${this.accountRows().length})</a></p>
+<p><a href="/app/accounts">Accounts (${this.accountRows().length})</a></p>
+<p class="muted">Chart of accounts</p>
 <form method="post" action="/app/logout"><button type="submit">Sign out</button></form>`,
       ),
       200,
