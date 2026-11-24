@@ -109,12 +109,11 @@ describe("tenant resolution before routing", () => {
     expect(tenant).toBe("tenant-alice");
   });
 
-  it("keeps tenant content out of the marketing page", async () => {
+  it("sends a tenant root straight to its book, never the marketing page", async () => {
     const app = createApp();
     const response = await app.request("http://alice.localhost/", {}, env());
-    const html = await response.text();
-    expect(html).toContain("tenant-alice");
-    expect(html).toContain("Saldima");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/app");
   });
 });
 

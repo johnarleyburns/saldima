@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { type Context, Hono } from "hono";
+import { designCss } from "./design.ts";
 import { sendSmtpEmail } from "./email/smtp.ts";
 import type { KvNamespaceLike } from "./ports/cloudflare-kv.ts";
 import type { R2BucketLike } from "./ports/cloudflare-r2.ts";
@@ -88,9 +89,13 @@ async function tenantFor(host: string, kv: AppBindings["KV"]): Promise<string | 
 function signupPage(error = ""): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Start Saldima</title>
-<style>body{font-family:system-ui,sans-serif;max-width:26rem;margin:0 auto;padding:2rem 1.25rem;color-scheme:light dark}label{display:block;margin-top:1rem;font-weight:600}input,select{box-sizing:border-box;width:100%;min-height:44px;margin-top:.35rem;padding:.6rem .75rem;font:inherit}button{min-height:44px;width:100%;margin-top:1.5rem;font:inherit;font-weight:650;background:#12664f;color:white;border:0;border-radius:.5rem}.error{background:#7f1d1d;color:white;padding:.75rem;border-radius:.5rem}.muted{color:GrayText;font-size:.9rem}</style></head>
-<body><main><h1>Saldima</h1><p>Your GnuCash books in any browser and on your phone. $5 a month or $50 a year.</p>
+<style>${designCss}</style></head>
+<body><main class="narrow">
+<a class="brand" href="/">Saldima</a>
+<h1>Start your book</h1>
+<p class="muted">$5 a month or $50 a year. Cancel from Settings; your .gnucash file is always yours.</p>
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<div class="card">
 <form method="post" action="/api/signup/checkout">
 <label for="name">Book address</label>
 <input id="name" name="name" required pattern="[a-z0-9][a-z0-9-]{1,28}[a-z0-9]" placeholder="acme"><p class="muted">Will be acme-dev.saldima.com</p>
@@ -99,7 +104,10 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <label for="plan">Plan</label>
 <select id="plan" name="plan"><option value="yearly">$50/year — 2 months free</option><option value="monthly">$5/month</option></select>
 <button type="submit">Continue to secure checkout</button>
-</form></main></body></html>`;
+</form>
+</div>
+<p class="muted">Prefer no hosting? The iPhone and Android apps work entirely offline.</p>
+</main></body></html>`;
 }
 
 function bookProvisioner(env: AppBindings) {
@@ -308,18 +316,27 @@ export function createApp(): Hono<AppEnv> {
 
   app.get("/", (c) => {
     const tenantId = c.get("tenantId");
-    if (!tenantId) {
-      return c.html(`<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Saldima</title></head>
-<body><main><h1>Saldima</h1><p>Hosted, GnuCash-compatible accounting. Compatible with GnuCash.</p></main></body>
-</html>`);
-    }
+    if (tenantId) return c.redirect("/app");
     return c.html(`<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Saldima</title></head>
-<body data-tenant="${escapeHtml(tenantId)}"><main><h1>Saldima</h1><p>Book: ${escapeHtml(tenantId)}</p><p><a href="/health">Health</a></p></main></body>
-</html>`);
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Saldima — GnuCash-compatible books</title>
+<style>${designCss}</style></head>
+<body>
+<header class="appbar"><a class="brand" href="/">Saldima</a><nav><a href="/signup">Start</a><a href="https://github.com/johnarleyburns/saldima">Source</a></nav></header>
+<main>
+<section class="hero">
+<h1>Your GnuCash books,<br>in any browser and on your phone.</h1>
+<p class="lede">Exact split values, half-up posting and real GnuCash files. Hosted for $5 a month, or fully offline in the mobile apps.</p>
+<a class="cta" href="/signup">Start with Stripe</a>
+<a class="cta secondary" href="https://github.com/johnarleyburns/saldima-ios">iPhone app</a>
+</section>
+<div class="grid">
+<div class="card"><h2 style="margin-top:0">Keeps your files</h2><p class="muted">SQLite and gzip XML books open unchanged. Amounts are exact rationals, never floating point.</p></div>
+<div class="card"><h2 style="margin-top:0">Familiar on purpose</h2><p class="muted">Accounts, registers, reports and help follow the GnuCash desktop layout, so there is nothing to relearn.</p></div>
+<div class="card"><h2 style="margin-top:0">Mobile when you are</h2><p class="muted">The iPhone and Android apps are standalone books with an optional one-time Supporter purchase.</p></div>
+</div>
+</main>
+<footer class="appfoot"><span>AGPL-3.0-only. Compatible with GnuCash; not affiliated with the GnuCash project.</span></footer>
+</body></html>`);
   });
 
   const forwardToBook = async (c: Context<AppEnv>) => {
