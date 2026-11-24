@@ -34,6 +34,7 @@ import {
 import { bookTotals, sumSplitBalances } from "./balances.ts";
 import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
+import { replaceBook } from "./data-access/book-import.ts";
 import { designCss } from "./design.ts";
 import { totpQrSvg } from "./qr.ts";
 import { balanceSheet, incomeStatement, trialBalance } from "./reports.ts";
@@ -942,43 +943,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (snapshot.accounts.length === 0) {
       return this.importPage(c, "The book has no accounts.");
     }
-    this.sql.exec("DELETE FROM splits");
-    this.sql.exec("DELETE FROM transactions");
-    this.sql.exec("DELETE FROM accounts");
-    for (const account of snapshot.accounts) {
-      this.sql.exec(
-        `INSERT INTO accounts
-         (guid, name, account_type, commodity_guid, parent_guid, code,
-          description, hidden, placeholder, created_at)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, 0, 0, ?)`,
-        account.guid,
-        account.name,
-        account.type,
-        account.parentGuid,
-        account.code,
-        account.description,
-        nowIso(),
-      );
-    }
-    for (const transaction of snapshot.transactions) {
-      this.sql.exec(
-        "INSERT INTO transactions (guid, currency_guid, post_date, description, created_at) VALUES (?, NULL, ?, ?, ?)",
-        transaction.guid,
-        transaction.date,
-        transaction.description,
-        nowIso(),
-      );
-      for (const split of transaction.splits) {
-        this.sql.exec(
-          "INSERT INTO splits (guid, tx_guid, account_guid, value_num, value_denom) VALUES (?, ?, ?, ?, ?)",
-          newGuid(),
-          transaction.guid,
-          split.accountGuid,
-          split.value.num.toString(),
-          split.value.denom.toString(),
-        );
-      }
-    }
+    replaceBook(this.sql, snapshot, newGuid, nowIso());
     return c.redirect("/app/accounts");
   }
 
