@@ -11,8 +11,10 @@ describe("account balances", () => {
       { accountGuid: "salary", value: money(-250_000n, 100n) },
       { accountGuid: "bank", value: money(-1n, 3n) },
     ]);
-    expect(equalsMoney(balances.get("bank")!, money(7_499n, 3n))).toBe(true);
-    expect(equalsMoney(balances.get("salary")!, money(-250_000n, 100n))).toBe(true);
+    const bank = balances.get("bank");
+    const salary = balances.get("salary");
+    expect(bank && equalsMoney(bank, money(7_499n, 3n))).toBe(true);
+    expect(salary && equalsMoney(salary, money(-250_000n, 100n))).toBe(true);
   });
 
   it("computes net assets and profit like the apps", () => {
