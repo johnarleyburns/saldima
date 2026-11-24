@@ -26,6 +26,20 @@ labels such as *File*, *Reports*, *Help*, and accounting terms.
 | Help: Contents, Tutorial & Concepts Guide, About | Help overlay with the same chapter structure, search, and per-screen context help. | Help inside Settings plus `?` on every screen. |
 | Window menu / open windows | Browser tabs and in-app tab strip. | Recent screens and register tabs. |
 
+## 1a. Companies, roots and totals
+
+- Every `.gnucash` file is a **company**. A person may keep several and switch
+  between them (web: book switcher; iOS/Android: the Accounts menu). There is no
+  "root" company.
+- The book root account is structural: GnuCash never shows it as a row, and
+  neither do we. Its children are the top level of the tree.
+- **New Book wizard**: company name, template, currency, fiscal year start.
+- The Accounts window shows a **Balance** per account and a rolled-up **Total**
+  for parents, then **Net assets** (assets − liabilities) and **Profit**
+  (income − expenses) for the book. Amounts use half-even display.
+- Import/export lives in the File/Tools menus: `.gnucash` XML and SQLite first,
+  then QIF, CSV and OFX with mapping and duplicate detection.
+
 ## 2. Terminology (never paraphrase these)
 
 Assets, Liabilities, Equity, Income, Expenses; Chart of Accounts; Account Type
