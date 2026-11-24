@@ -1111,6 +1111,8 @@ ${body}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const user = this.userById(session.user_id);
     if (!user) return c.redirect("/app/login");
+    const balances = this.balanceMap();
+    const totals = bookTotals(this.accountRows(), balances);
     return c.html(
       this.appPage(
         "Book",
@@ -1118,8 +1120,8 @@ ${body}
 <p class="muted">${escapeHtml(user.email)} · ${escapeHtml(user.role)} · ${escapeHtml(c.get("tenantId"))}</p>
 <div class="summary">
 <div class="stat accent"><div class="label">Accounts</div><div class="value">${this.accountRows().length}</div></div>
-<div class="stat green"><div class="label">Net assets</div><div class="value">0.00</div></div>
-<div class="stat blue"><div class="label">Profit</div><div class="value">0.00</div></div>
+<div class="stat green"><div class="label">Net assets</div><div class="value">${formatMoney(totals.netAssets, 100n)}</div></div>
+<div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
 </div>
 <div class="grid">
 <a class="card" href="/app/accounts" style="text-decoration:none;color:inherit"><h2 style="margin-top:0">Chart of accounts</h2><p class="muted">Browse, add and edit accounts. Branches fold like the desktop tree.</p></a>
