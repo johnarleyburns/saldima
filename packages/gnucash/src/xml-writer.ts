@@ -2,7 +2,7 @@
 
 import type { BookSnapshot, SnapshotAccount, SnapshotTransaction } from "./book-file";
 
-function escape(value: string): string {
+function escapeXml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -12,17 +12,17 @@ function escape(value: string): string {
 
 function accountXml(account: SnapshotAccount): string {
   const parent = account.parentGuid
-    ? `\n  <act:parent type="guid">${escape(account.parentGuid)}</act:parent>`
+    ? `\n  <act:parent type="guid">${escapeXml(account.parentGuid)}</act:parent>`
     : "";
   const commodity = account.commodityCode
-    ? `\n  <act:commodity><cmdty:space>CURRENCY</cmdty:space><cmdty:id>${escape(account.commodityCode)}</cmdty:id></act:commodity>\n  <act:commodity-scu>100</act:commodity-scu>`
+    ? `\n  <act:commodity><cmdty:space>CURRENCY</cmdty:space><cmdty:id>${escapeXml(account.commodityCode)}</cmdty:id></act:commodity>\n  <act:commodity-scu>100</act:commodity-scu>`
     : "";
   return `<gnc:account version="2.0.0">
-  <act:name>${escape(account.name)}</act:name>
-  <act:id type="guid">${escape(account.guid)}</act:id>
-  <act:type>${escape(account.type)}</act:type>${commodity}${parent}
-  <act:code>${escape(account.code)}</act:code>
-  <act:description>${escape(account.description)}</act:description>
+  <act:name>${escapeXml(account.name)}</act:name>
+  <act:id type="guid">${escapeXml(account.guid)}</act:id>
+  <act:type>${escapeXml(account.type)}</act:type>${commodity}${parent}
+  <act:code>${escapeXml(account.code)}</act:code>
+  <act:description>${escapeXml(account.description)}</act:description>
 </gnc:account>`;
 }
 
@@ -32,8 +32,8 @@ function splitXml(split: {
 }): string {
   const value = `${split.value.num}/${split.value.denom}`;
   return `<trn:split>
-  <split:id type="guid">${escape(split.accountGuid)}-${value.replace("/", "-")}</split:id>
-  <split:account>${escape(split.accountGuid)}</split:account>
+  <split:id type="guid">${escapeXml(split.accountGuid)}-${value.replace("/", "-")}</split:id>
+  <split:account>${escapeXml(split.accountGuid)}</split:account>
   <split:value>${value}</split:value>
   <split:quantity>${value}</split:quantity>
 </trn:split>`;
@@ -41,10 +41,10 @@ function splitXml(split: {
 
 function transactionXml(transaction: SnapshotTransaction): string {
   return `<gnc:transaction version="2.0.0">
-  <trn:id type="guid">${escape(transaction.guid)}</trn:id>
-  <trn:currency><cmdty:space>CURRENCY</cmdty:space><cmdty:id>${escape(transaction.currencyCode ?? "USD")}</cmdty:id></trn:currency>
-  <trn:date-posted><ts:date>${escape(transaction.date)} 00:00:00 +0000</ts:date></trn:date-posted>
-  <trn:description>${escape(transaction.description)}</trn:description>
+  <trn:id type="guid">${escapeXml(transaction.guid)}</trn:id>
+  <trn:currency><cmdty:space>CURRENCY</cmdty:space><cmdty:id>${escapeXml(transaction.currencyCode ?? "USD")}</cmdty:id></trn:currency>
+  <trn:date-posted><ts:date>${escapeXml(transaction.date)} 00:00:00 +0000</ts:date></trn:date-posted>
+  <trn:description>${escapeXml(transaction.description)}</trn:description>
   <trn:splits>${transaction.splits.map(splitXml).join("")}</trn:splits>
 </gnc:transaction>`;
 }
@@ -64,10 +64,10 @@ export function writeGnuCashXml(snapshot: BookSnapshot): string {
      xmlns:ts="http://www.gnucash.org/XML/ts">
 <gnc:count-data cd:type="book">1</gnc:count-data>
 <gnc:book version="2.0.0">
-<book:id type="guid">${escape(snapshot.bookGuid)}</book:id>
+<book:id type="guid">${escapeXml(snapshot.bookGuid)}</book:id>
 <gnc:commodity version="2.0.0">
   <cmdty:space>CURRENCY</cmdty:space>
-  <cmdty:id>${escape(currency)}</cmdty:id>
+  <cmdty:id>${escapeXml(currency)}</cmdty:id>
   <cmdty:fraction>${snapshot.fraction ?? 100}</cmdty:fraction>
 </gnc:commodity>
 ${snapshot.accounts.map(accountXml).join("\n")}
