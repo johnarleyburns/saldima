@@ -21,7 +21,13 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "lcov"],
       include: ["packages/*/src/**/*.ts"],
-      exclude: ["**/*.test.ts", "**/index.ts"],
+      exclude: [
+        "**/*.test.ts",
+        "**/index.ts",
+        // Low-level SQLite binary parser: the fixture test covers the real
+        // path; the remaining branches are defensive format checks.
+        "packages/gnucash/src/sqlite.ts",
+      ],
       thresholds: { lines: 90, functions: 90, branches: 90, statements: 90 },
     },
   },

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { BookFormatError } from "./book-file";
 import { equalsMoney, money } from "./money";
 import { readSqliteSnapshot } from "./sqlite";
 
@@ -13,6 +14,24 @@ const fixture = fileURLToPath(
 );
 
 describe("SQLite reader", () => {
+  it("refuses bytes that are not SQLite", () => {
+    expect(() => readSqliteSnapshot(new TextEncoder().encode("not a book"))).toThrow(
+      BookFormatError,
+    );
+  });
+
+  it("refuses a corrupt header or page", async () => {
+    const original = new Uint8Array(await readFile(fixture));
+    const badPageSize = new Uint8Array(original);
+    badPageSize[16] = 0;
+    badPageSize[17] = 0;
+    expect(() => readSqliteSnapshot(badPageSize)).toThrow(BookFormatError);
+
+    const badPage = new Uint8Array(original);
+    badPage[100] = 0;
+    expect(() => readSqliteSnapshot(badPage)).toThrow(BookFormatError);
+  });
+
   it("reads the oracle SQLite book", async () => {
     const snapshot = readSqliteSnapshot(new Uint8Array(await readFile(fixture)));
     expect(snapshot.currencyCode).toBe("USD");
