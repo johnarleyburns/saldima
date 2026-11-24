@@ -799,6 +799,33 @@ ${setupBlock}
     );
   }
 
+  /** What the Accounts window shows: no structural ROOT and no template tree. */
+  private visibleAccountRows(bookId: string): AccountRow[] {
+    const rows = this.accountRows(bookId);
+    const excluded = new Set<string>();
+    const templateRoot = rows.find(
+      (row) =>
+        row.account_type === "ROOT" &&
+        row.name.trim().toLowerCase() === "template root",
+    )?.guid;
+    if (templateRoot) {
+      const children = new Map<string, string[]>();
+      for (const row of rows) {
+        if (!row.parent_guid) continue;
+        const list = children.get(row.parent_guid) ?? [];
+        list.push(row.guid);
+        children.set(row.parent_guid, list);
+      }
+      const mark = (guid: string): void => {
+        if (excluded.has(guid)) return;
+        excluded.add(guid);
+        for (const child of children.get(guid) ?? []) mark(child);
+      };
+      mark(templateRoot);
+    }
+    return rows.filter((row) => row.account_type !== "ROOT" && !excluded.has(row.guid));
+  }
+
   private splitRows(bookId: string): Array<{ accountGuid: string; value: Money }> {
     return this.rows<{ account_guid: string; value_num: string; value_denom: string }>(
       "SELECT account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
@@ -838,7 +865,7 @@ ${setupBlock}
   }
 
   private accountsTree(bookId: string): AccountNode[] {
-    const rows = this.accountRows(bookId);
+    const rows = this.visibleAccountRows(bookId);
     const nodes = new Map<string, AccountNode>();
     for (const row of rows) nodes.set(row.guid, { ...row, children: [] });
     const roots: AccountNode[] = [];
@@ -920,8 +947,17 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     );
   }
 
+  /** Structural roots and template accounts are never edited from the tree. */
+  private editableAccount(guid: string, bookId: string): AccountRow | null {
+    const account = this.accountByGuid(guid, bookId);
+    if (!account) return null;
+    return this.visibleAccountRows(bookId).some((row) => row.guid === guid)
+      ? account
+      : null;
+  }
+
   private descendantGuids(guid: string, bookId: string): Set<string> {
-    const rows = this.accountRows(bookId);
+    const rows = this.visibleAccountRows(bookId);
     const children = new Map<string, string[]>();
     for (const row of rows) {
       if (row.parent_guid) {
@@ -954,7 +990,7 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
   }
 
   private importAccounts(bookId: string): AccountRow[] {
-    return this.accountRows(bookId).filter(
+    return this.visibleAccountRows(bookId).filter(
       (account) => !account.placeholder && !account.hidden,
     );
   }
@@ -1072,7 +1108,7 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const account = this.accountByGuid(guid, c.get("bookId"));
+    const account = this.editableAccount(guid, c.get("bookId"));
     if (!account) return c.text("Account not found", 404);
     return c.html(
       this.appPage(
@@ -1110,7 +1146,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const guid = c.req.param("guid") ?? "";
     const bookId = c.get("bookId");
-    const account = guid ? this.accountByGuid(guid, bookId) : null;
+    const account = guid ? this.editableAccount(guid, bookId) : null;
     if (!account) return c.text("Account not found", 404);
     const body = await c.req.parseBody();
     const name = formValue(body, "name");
@@ -1124,8 +1160,9 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       );
     }
     if (parent) {
+      const visible = this.visibleAccountRows(bookId);
       if (
-        !this.accountByGuid(parent, bookId) ||
+        !visible.some((row) => row.guid === parent) ||
         this.descendantGuids(guid, bookId).has(parent)
       ) {
         return this.editAccountPage(
@@ -1160,7 +1197,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const guid = c.req.param("guid") ?? "";
     const bookId = c.get("bookId");
-    const account = guid ? this.accountByGuid(guid, bookId) : null;
+    const account = guid ? this.editableAccount(guid, bookId) : null;
     if (!account) return c.text("Account not found", 404);
     if (this.childCount(guid, bookId) > 0) {
       return this.editAccountPage(
@@ -1180,7 +1217,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const bookId = c.get("bookId");
     const book = this.activeBook(c);
     const balances = this.balanceMap(bookId);
-    const rows = this.accountRows(bookId);
+    const rows = this.visibleAccountRows(bookId);
     const totals = bookTotals(rows, balances);
     return c.html(
       this.appPage(
@@ -1480,7 +1517,9 @@ ${
       defaultAccountGuid: defaultAccount.guid,
       categoryAccounts,
     });
-    const knownAccounts = new Set(this.accountRows(bookId).map((row) => row.guid));
+    const knownAccounts = new Set(
+      this.visibleAccountRows(bookId).map((row) => row.guid),
+    );
     for (const transaction of planned) {
       let total = money(0n);
       for (const split of transaction.splits) {
@@ -1539,7 +1578,14 @@ ${
     const bookId = c.get("bookId");
     const book = this.activeBook(c);
     const currency = book.currency;
-    const accounts = this.accountRows(bookId).map((row) => ({
+    const allAccounts = this.accountRows(bookId);
+    const templateRootGuid =
+      allAccounts.find(
+        (row) =>
+          row.account_type === "ROOT" &&
+          row.name.trim().toLowerCase() === "template root",
+      )?.guid ?? null;
+    const accounts = allAccounts.map((row) => ({
       guid: row.guid,
       name: row.name,
       type: row.account_type,
@@ -1547,14 +1593,17 @@ ${
       commodityCode: currency,
       code: row.code ?? "",
       description: "",
+      hidden: row.hidden === 1,
+      placeholder: row.placeholder === 1,
     }));
     const splitRows = this.rows<{
+      guid: string;
       tx_guid: string;
       account_guid: string;
       value_num: string;
       value_denom: string;
     }>(
-      "SELECT tx_guid, account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
+      "SELECT guid, tx_guid, account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
       bookId,
     );
     const transactions = this.rows<{
@@ -1572,6 +1621,7 @@ ${
       splits: splitRows
         .filter((split) => split.tx_guid === tx.guid)
         .map((split) => ({
+          guid: split.guid,
           accountGuid: split.account_guid,
           value: money(BigInt(split.value_num), BigInt(split.value_denom)),
         })),
@@ -1582,6 +1632,7 @@ ${
       fraction: 100,
       accounts,
       transactions,
+      templateRootGuid,
     });
     const gzipped = await new Response(
       new Blob([new TextEncoder().encode(xml)])
@@ -1600,7 +1651,7 @@ ${
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const accounts = this.accountRows(c.get("bookId")).map((row) => ({
+    const accounts = this.visibleAccountRows(c.get("bookId")).map((row) => ({
       guid: row.guid,
       name: row.name,
       account_type: row.account_type,
@@ -1737,8 +1788,8 @@ ${items || `<p class="muted">No transactions yet.</p>`}`,
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const options = this.accountRows(c.get("bookId"))
-      .filter((row) => !row.placeholder)
+    const options = this.visibleAccountRows(c.get("bookId"))
+      .filter((row) => !row.placeholder && !row.hidden)
       .map(
         (row) =>
           `<option value="${escapeHtml(row.guid)}">${escapeHtml(row.name)}</option>`,
@@ -1780,7 +1831,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const to = formValue(body, "to");
     const amountText = formValue(body, "amount");
     const bookId = c.get("bookId");
-    const accounts = new Set(this.accountRows(bookId).map((row) => row.guid));
+    const accounts = new Set(this.visibleAccountRows(bookId).map((row) => row.guid));
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return this.newTransactionPage(c, "Enter a valid date.");
     }
@@ -1862,7 +1913,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!name || name.length > 200 || !ACCOUNT_TYPES.includes(type as AccountType)) {
       return this.newAccountPage(c, "Enter a name and choose a valid account type.");
     }
-    if (parent && !this.accountRows(bookId).some((row) => row.guid === parent)) {
+    if (parent && !this.visibleAccountRows(bookId).some((row) => row.guid === parent)) {
       return this.newAccountPage(c, "The selected parent no longer exists.");
     }
     this.sql.exec(
@@ -2050,7 +2101,7 @@ ${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join
     const user = this.userById(session.user_id);
     if (!user) return c.redirect("/app/login");
     const balances = this.balanceMap(c.get("bookId"));
-    const rows = this.accountRows(c.get("bookId"));
+    const rows = this.visibleAccountRows(c.get("bookId"));
     const totals = bookTotals(rows, balances);
     return c.html(
       this.appPage(

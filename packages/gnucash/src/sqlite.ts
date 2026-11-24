@@ -220,7 +220,7 @@ class Reader {
 export function readSqliteSnapshot(bytes: Uint8Array): BookSnapshot {
   const { tables } = new Reader(bytes).read();
   const book = tables.books?.[0];
-  if (!book?.root_account_guid) throw new BookFormatError("book has no books row");
+  if (!book?.guid) throw new BookFormatError("book has no books row");
   const currency = (tables.commodities ?? []).find(
     (row) => row.namespace === "CURRENCY",
   );
@@ -232,6 +232,8 @@ export function readSqliteSnapshot(bytes: Uint8Array): BookSnapshot {
     commodityCode: row.commodity_guid ? (currency?.mnemonic ?? null) : null,
     code: row.code ?? "",
     description: row.description ?? "",
+    hidden: row.hidden === "1",
+    placeholder: row.placeholder === "1",
   }));
   if (accounts.length === 0) throw new BookFormatError("book has no accounts");
 
@@ -245,6 +247,7 @@ export function readSqliteSnapshot(bytes: Uint8Array): BookSnapshot {
       splits: splits
         .filter((split) => split.tx_guid === row.guid)
         .map((split) => ({
+          guid: split.guid ?? undefined,
           accountGuid: split.account_guid ?? "",
           value: money(
             BigInt(split.value_num ?? "0"),
@@ -255,12 +258,13 @@ export function readSqliteSnapshot(bytes: Uint8Array): BookSnapshot {
   );
 
   return {
-    bookGuid: book.root_account_guid,
+    bookGuid: book.guid,
     currencyCode: currency?.mnemonic ?? null,
     fraction: transactions[0]?.splits[0]
       ? Number(transactions[0].splits[0].value.denom)
       : null,
     accounts,
     transactions,
+    templateRootGuid: book.root_template_guid ?? null,
   };
 }

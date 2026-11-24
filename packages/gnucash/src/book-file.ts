@@ -12,9 +12,12 @@ export interface SnapshotAccount {
   readonly commodityCode: string | null;
   readonly code: string;
   readonly description: string;
+  readonly hidden?: boolean;
+  readonly placeholder?: boolean;
 }
 
 export interface SnapshotSplit {
+  readonly guid?: string | undefined;
   readonly accountGuid: string;
   readonly value: Money;
 }
@@ -33,6 +36,7 @@ export interface BookSnapshot {
   readonly fraction: number | null;
   readonly accounts: readonly SnapshotAccount[];
   readonly transactions: readonly SnapshotTransaction[];
+  readonly templateRootGuid?: string | null;
 }
 
 export class BookFormatError extends Error {
@@ -230,6 +234,14 @@ export function parseGnuCashXml(xml: string): BookSnapshot {
 
   const accounts: SnapshotAccount[] = children(book, "account").map((account) => {
     const commodity = first(account, "commodity");
+    const flags = { hidden: false, placeholder: false };
+    const slots = first(account, "slots");
+    for (const slot of slots ? children(slots, "slot") : []) {
+      const key = text(first(slot, "key"));
+      const value = text(first(slot, "value"));
+      if (key === "hidden") flags.hidden = value === "true";
+      else if (key === "placeholder") flags.placeholder = value === "true";
+    }
     return {
       guid: text(first(account, "id")),
       name: text(first(account, "name")),
@@ -238,6 +250,8 @@ export function parseGnuCashXml(xml: string): BookSnapshot {
       commodityCode: commodity ? text(first(commodity, "id")) : null,
       code: text(first(account, "code")),
       description: text(first(account, "description")),
+      hidden: flags.hidden,
+      placeholder: flags.placeholder,
     };
   });
   if (accounts.length === 0) throw new BookFormatError("book has no accounts");
@@ -248,6 +262,7 @@ export function parseGnuCashXml(xml: string): BookSnapshot {
       const dateNode = first(transaction, "date-posted");
       const splitContainer = first(transaction, "splits");
       const splits = children(splitContainer ?? transaction, "split").map((split) => ({
+        guid: text(first(split, "id")) || undefined,
         accountGuid: text(first(split, "account")),
         value: rational(text(first(split, "value"))),
       }));

@@ -26,6 +26,7 @@ Everything else in the accounting surface must match the web to the cent.
 | Account create/edit/move/hide/placeholder/delete             | yes                  | **missing**            | **missing**       | Gap                                   |
 | Exact money, half-up posting, half-even display              | yes                  | yes                    | yes               | In sync                               |
 | Journal posting validation (balance, duplicates, dates)      | yes                  | yes                    | yes               | In sync                               |
+| Export `.gnucash` gzip XML                                   | yes                  | yes                    | yes               | In sync; GnuCash 5.14 opens all three |
 | Trial balance, balance sheet, P&L, retained earnings         | yes                  | yes                    | yes               | In sync                               |
 | `verifyLedger` invariant report                              | yes                  | **missing**            | **missing**       | Gap                                   |
 | Reports UI                                                   | —                    | —                      | —                 | Neither track; planned                |
