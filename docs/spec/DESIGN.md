@@ -3,6 +3,13 @@
 
 High-level and low-level design behind the spec. TypeScript on Cloudflare Workers end to end; GnuCash's SQLite schema is the data model.
 
+> **Superseded (storage/encryption):** see
+> `docs/architecture/TECHNICAL-DESIGN.md`. GnuCash XML, not a SQLite schema,
+> is the canonical book model; the Durable Object's SQLite is not the
+> accounting store; the cloud holds only encrypted R2 snapshots and
+> coordination metadata, moving toward zero-knowledge client-side encryption
+> instead of the server-held key described below.
+
 ## High-level design
 
 Saldima is a stateless edge Worker in front of one stateful Durable Object per book. Everything durable lives either in that object's SQLite database or in R2. The component diagram is in the Spec tab's Architecture section.

@@ -12,12 +12,21 @@ track lives in `johnarleyburns/saldima-ios` and consumes golden vectors and the
 
 ## Source of truth
 
-1. `docs/spec/SPEC.md` and `docs/spec/DESIGN.md` (the checked-in Spec and
-   Design tabs). Ask for a fresh export if a tab changes.
-2. `docs/spec/GO-TO-MARKET.md` for positioning and launch constraints.
-3. This file.
-4. `docs/plans/P0.md` and the phase plans in `docs/plans/`.
-5. The GitHub issue being worked. Its acceptance criteria are the definition of
+1. `docs/architecture/TECHNICAL-DESIGN.md` — the current architecture
+   baseline. It supersedes the storage and encryption sections of
+   `docs/spec/SPEC.md`/`DESIGN.md` below: GnuCash XML is canonical (no
+   SQLite as an accounting store, in a Durable Object or otherwise), the
+   cloud holds only encrypted R2 snapshots and coordination metadata, moving
+   toward zero-knowledge client-side encryption. Migration to it is phased
+   (see `docs/plans/P0.md` risks); until a given piece lands, the old
+   behaviour it describes may still be what's running.
+2. `docs/spec/SPEC.md` and `docs/spec/DESIGN.md` (the checked-in Spec and
+   Design tabs) for product, pricing and phases — ask for a fresh export if
+   a tab changes. Their storage/encryption passages are superseded by (1).
+3. `docs/spec/GO-TO-MARKET.md` for positioning and launch constraints.
+4. This file.
+5. `docs/plans/P0.md` and the phase plans in `docs/plans/`.
+6. The GitHub issue being worked. Its acceptance criteria are the definition of
    done.
 
 If the spec and an issue disagree, stop and ask in the issue. Do not invent
@@ -28,13 +37,19 @@ relevant plan.
 
 - **Runtime:** Cloudflare Workers (workerd), Workers Paid plan, TypeScript.
 - **Web:** Hono router, Hono JSX, htmx, mobile-first CSS; installable PWA.
-- **Data:** one `Book` Durable Object per tenant (`idFromName(tenantId)`);
-  Drizzle ORM over the object's SQLite with `durable-sqlite`; GnuCash 5.x tables
-  plus `gcw_` tables for users, sessions, leases, inbox and audit.
-- **Storage:** R2 for snapshots (`tenants/<id>/<sha256>.gnucash.gz`) and
-  attachments; KV for hostname → tenant.
+- **Data (migrating — see `docs/architecture/TECHNICAL-DESIGN.md`):** the
+  target is GnuCash XML as the sole canonical book, stored as a gzip'd
+  document in R2 (`tenants/<id>/<sha256>.gnucash.gz`) with no Durable Object
+  accounting store. Until that migration lands, the running system still
+  uses one `Book` Durable Object per tenant (`idFromName(tenantId)`) with
+  Drizzle ORM over the object's SQLite (`durable-sqlite`), GnuCash 5.x tables
+  plus `gcw_` tables for users, sessions, leases, inbox and audit. Do not add
+  new accounting features to the Drizzle/SQLite model; new work should move
+  toward the XML-canonical design.
+- **Storage:** R2 for snapshots and attachments; KV for hostname → tenant.
 - **Converter:** Cloudflare Container running `python3-gnucash` for XML ↔ SQLite
-  and the real-GnuCash oracle. Never linked into the app.
+  and the real-GnuCash oracle. Never linked into the app. This import/export
+  boundary already matches the target architecture — keep it as-is.
 - **Tooling:** pnpm workspace, Vitest (Node + `@cloudflare/vitest-pool-workers`),
   Playwright, Biome, fast-check, Stryker weekly on money/sync packages.
 - **Payments:** Stripe Checkout + webhook (test mode locally and on staging).
