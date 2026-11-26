@@ -93,6 +93,51 @@ function typeLabel(type: string): string {
   return type.charAt(0) + type.slice(1).toLowerCase();
 }
 
+// MARK: - Report period presets
+//
+// Pure calendar math on an already-known `YYYY-MM-DD` string (never `new
+// Date`, which the lint gate reserves for clock adapters) so Reports can
+// offer "This month/quarter/year" without reading wall-clock time itself.
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  if (month === 4 || month === 6 || month === 9 || month === 11) return 30;
+  return 31;
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function monthRange(today: string): { from: string; to: string } {
+  const year = Number(today.slice(0, 4));
+  const month = Number(today.slice(5, 7));
+  return {
+    from: `${year}-${pad2(month)}-01`,
+    to: `${year}-${pad2(month)}-${pad2(daysInMonth(year, month))}`,
+  };
+}
+
+function quarterRange(today: string): { from: string; to: string } {
+  const year = Number(today.slice(0, 4));
+  const month = Number(today.slice(5, 7));
+  const startMonth = Math.floor((month - 1) / 3) * 3 + 1;
+  const endMonth = startMonth + 2;
+  return {
+    from: `${year}-${pad2(startMonth)}-01`,
+    to: `${year}-${pad2(endMonth)}-${pad2(daysInMonth(year, endMonth))}`,
+  };
+}
+
+function yearRange(today: string): { from: string; to: string } {
+  const year = today.slice(0, 4);
+  return { from: `${year}-01-01`, to: `${year}-12-31` };
+}
+
 export interface BookEnv {
   ENVIRONMENT?: string;
   SETUP_TOKEN?: string;
@@ -845,13 +890,16 @@ ${setupBlock}
 
   private async splitRows(
     bookId: string,
-  ): Promise<Array<{ accountGuid: string; value: Money }>> {
+  ): Promise<Array<{ accountGuid: string; value: Money; date: string }>> {
     const document = await this.store.get(bookId);
     if (!document) return [];
-    return document
-      .transactions()
-      .flatMap((transaction) => transaction.splits)
-      .map((split) => ({ accountGuid: split.accountGuid, value: split.value }));
+    return document.transactions().flatMap((transaction) =>
+      transaction.splits.map((split) => ({
+        accountGuid: split.accountGuid,
+        value: split.value,
+        date: transaction.datePosted,
+      })),
+    );
   }
 
   private async balanceMap(bookId: string): Promise<Map<string, Money>> {
@@ -1885,33 +1933,71 @@ ${
       account_type: row.account_type,
     }));
     const splits = await this.splitRows(bookId);
-    const trial = trialBalance(accounts, splits);
-    const sheet = balanceSheet(accounts, splits);
-    const pnl = incomeStatement(accounts, splits);
+
+    const today = nowIso().slice(0, 10);
+    const asOf = (c.req.query("as_of") ?? today).trim();
+    const fromRaw = (c.req.query("from") ?? "").trim();
+    const toRaw = (c.req.query("to") ?? "").trim();
+    const period = { ...(fromRaw && { from: fromRaw }), ...(toRaw && { to: toRaw }) };
+
+    const trial = trialBalance(accounts, splits, asOf || undefined);
+    const sheet = balanceSheet(accounts, splits, asOf || undefined);
+    const pnl = incomeStatement(accounts, splits, period);
     const trialRows = trial.rows
       .map(
         (row) =>
           `<li><span>${escapeHtml(row.name)} <span class="chip type-${escapeHtml(row.type.toLowerCase())}">${escapeHtml(typeLabel(row.type))}</span></span><span class="amount">${formatMoney(row.debit.num === 0n ? row.credit : row.debit, 100n)}</span></li>`,
       )
       .join("");
+    const presetLink = (
+      label: string,
+      range: { from: string; to: string } | null,
+    ): string => {
+      const query = range
+        ? `?as_of=${encodeURIComponent(asOf)}&from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+        : `?as_of=${encodeURIComponent(asOf)}&from=&to=`;
+      const active =
+        range === null
+          ? !fromRaw && !toRaw
+          : range.from === fromRaw && range.to === toRaw;
+      return `<a class="button secondary${active ? " active" : ""}" href="/app/reports${query}">${escapeHtml(label)}</a>`;
+    };
     return c.html(
       this.appPage(
         "Reports",
         `<h1>Reports</h1>
 <p class="muted">Same reports and kernel as the apps. Amounts are half-even for display.</p>
+<form method="get" action="/app/reports" class="card">
+<h2 style="margin-top:0">Period</h2>
+<label for="as_of">Balance sheet &amp; trial balance, as of</label>
+<input id="as_of" name="as_of" type="date" value="${escapeHtml(asOf)}">
+<label for="from">Profit &amp; loss, from</label>
+<input id="from" name="from" type="date" value="${escapeHtml(fromRaw)}">
+<label for="to">to</label>
+<input id="to" name="to" type="date" value="${escapeHtml(toRaw)}">
+<button type="submit">Apply</button>
+<p class="muted" style="margin-top:0.75rem">
+${presetLink("This month", monthRange(today))}
+${presetLink("This quarter", quarterRange(today))}
+${presetLink("This year", yearRange(today))}
+${presetLink("All time", null)}
+</p>
+</form>
 <div class="summary">
 <div class="stat accent"><div class="label">Net assets</div><div class="value">${formatMoney(sheet.assets, 100n)}</div></div>
 <div class="stat green"><div class="label">Profit</div><div class="value">${formatMoney(pnl.netIncome, 100n)}</div></div>
 <div class="stat blue"><div class="label">Trial balance</div><div class="value">${trial.balanced ? "Balanced" : "Out"}</div></div>
 </div>
-<div class="card"><h2 style="margin-top:0">Trial balance</h2><ul class="journal">${trialRows || `<li><span class="muted">No postings yet.</span></li>`}</ul></div>
+<div class="card"><h2 style="margin-top:0">Trial balance</h2><p class="muted" style="margin-top:-0.5rem">as of ${escapeHtml(asOf)}</p><ul class="journal">${trialRows || `<li><span class="muted">No postings yet.</span></li>`}</ul></div>
 <div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Balance sheet</h2>
+<p class="muted" style="margin-top:-0.5rem">as of ${escapeHtml(asOf)}</p>
 <ul class="journal">
 <li><span>Assets</span><span class="amount">${formatMoney(sheet.assets, 100n)}</span></li>
 <li><span>Liabilities</span><span class="amount">${formatMoney(sheet.liabilities, 100n)}</span></li>
 <li><span>Equity</span><span class="amount">${formatMoney(addMoney(sheet.equity, sheet.retainedEarnings), 100n)}</span></li>
 </ul></div>
 <div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Profit &amp; loss</h2>
+<p class="muted" style="margin-top:-0.5rem">${fromRaw || toRaw ? `${escapeHtml(fromRaw || "the start")} to ${escapeHtml(toRaw || "now")}` : "all time"}</p>
 <ul class="journal">
 <li><span>Revenue</span><span class="amount">${formatMoney(pnl.revenue, 100n)}</span></li>
 <li><span>Expenses</span><span class="amount">${formatMoney(pnl.expenses, 100n)}</span></li>

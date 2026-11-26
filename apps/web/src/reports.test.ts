@@ -11,11 +11,16 @@ const accounts = [
   { guid: "rent", name: "Rent", account_type: "EXPENSE" },
 ];
 
+// Opening balance on 2026-01-01, then a sale and a rent payment on
+// 2026-02-10 -- split across two days so period filtering has something
+// real to filter.
 const splits = [
-  { accountGuid: "bank", value: money(115_000n, 100n) },
-  { accountGuid: "equity", value: money(-100_000n, 100n) },
-  { accountGuid: "sales", value: money(-20_000n, 100n) },
-  { accountGuid: "rent", value: money(5_000n, 100n) },
+  { accountGuid: "bank", value: money(100_000n, 100n), date: "2026-01-01" },
+  { accountGuid: "equity", value: money(-100_000n, 100n), date: "2026-01-01" },
+  { accountGuid: "bank", value: money(20_000n, 100n), date: "2026-02-10" },
+  { accountGuid: "sales", value: money(-20_000n, 100n), date: "2026-02-10" },
+  { accountGuid: "bank", value: money(-5_000n, 100n), date: "2026-02-10" },
+  { accountGuid: "rent", value: money(5_000n, 100n), date: "2026-02-10" },
 ];
 
 describe("reports", () => {
@@ -36,5 +41,42 @@ describe("reports", () => {
     expect(equalsMoney(pnl.revenue, money(20_000n, 100n))).toBe(true);
     expect(equalsMoney(pnl.expenses, money(5_000n, 100n))).toBe(true);
     expect(equalsMoney(pnl.netIncome, money(15_000n, 100n))).toBe(true);
+  });
+
+  it("balance sheet and trial balance are as-of a single date, cumulative since inception", () => {
+    const beforeTheSale = balanceSheet(accounts, splits, "2026-01-31");
+    expect(equalsMoney(beforeTheSale.assets, money(100_000n, 100n))).toBe(true);
+    expect(equalsMoney(beforeTheSale.retainedEarnings, money(0n))).toBe(true);
+
+    const afterEverything = balanceSheet(accounts, splits, "2026-02-10");
+    expect(equalsMoney(afterEverything.assets, money(115_000n, 100n))).toBe(true);
+
+    const trialBeforeTheSale = trialBalance(accounts, splits, "2026-01-31");
+    expect(trialBeforeTheSale.rows).toHaveLength(2);
+    expect(equalsMoney(trialBeforeTheSale.totalDebits, money(100_000n, 100n))).toBe(
+      true,
+    );
+  });
+
+  it("income statement is a range: only activity between from and to counts", () => {
+    const wholeYear = incomeStatement(accounts, splits, {
+      from: "2026-01-01",
+      to: "2026-12-31",
+    });
+    expect(equalsMoney(wholeYear.netIncome, money(15_000n, 100n))).toBe(true);
+
+    const beforeTheSale = incomeStatement(accounts, splits, {
+      from: "2026-01-01",
+      to: "2026-01-31",
+    });
+    expect(equalsMoney(beforeTheSale.revenue, money(0n))).toBe(true);
+    expect(equalsMoney(beforeTheSale.expenses, money(0n))).toBe(true);
+
+    const onlyFebruary = incomeStatement(accounts, splits, {
+      from: "2026-02-01",
+      to: "2026-02-28",
+    });
+    expect(equalsMoney(onlyFebruary.revenue, money(20_000n, 100n))).toBe(true);
+    expect(equalsMoney(onlyFebruary.expenses, money(5_000n, 100n))).toBe(true);
   });
 });
