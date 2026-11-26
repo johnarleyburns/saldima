@@ -13,7 +13,13 @@ function versionPrefix(tenantId: string, bookId: string): string {
 
 function versionKey(tenantId: string, bookId: string, now: string): string {
   const nonce = crypto.randomUUID();
-  return `${versionPrefix(tenantId, bookId)}${now}-${nonce}.gnucash.gz.enc`;
+  return `${versionPrefix(tenantId, bookId)}${now}_${nonce}.gnucash.gz.enc`;
+}
+
+/** A version id is the key with the tenant/book prefix stripped off. */
+function versionTimestamp(id: string): string | null {
+  const match = id.match(/^(.+)_[0-9a-f-]+\.gnucash\.gz\.enc$/);
+  return match?.[1] ?? null;
 }
 
 function arrayBufferCopy(bytes: Uint8Array): ArrayBuffer {
@@ -34,6 +40,13 @@ async function gunzip(bytes: Uint8Array): Promise<Uint8Array> {
     .stream()
     .pipeThrough(new DecompressionStream("gzip"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+export interface BookVersion {
+  /** Opaque id for this version; pass back to `getVersion`/`restore`. */
+  readonly id: string;
+  /** The `now` timestamp given to `save`/`replace` when this version was written. */
+  readonly timestamp: string;
 }
 
 /**
@@ -60,14 +73,52 @@ export class BookXmlStore {
     if (cached) return cached;
     const latest = await this.latestVersionKey(bookId);
     if (!latest) return null;
-    const object = await this.bucket.get(latest);
+    const document = await this.loadKey(latest);
+    if (document) this.cache.set(bookId, document);
+    return document;
+  }
+
+  /** Every backup version of this book, newest first. */
+  async versions(bookId: string): Promise<BookVersion[]> {
+    const prefix = versionPrefix(this.tenantId, bookId);
+    const keys = await this.allVersionKeys(bookId);
+    const found: BookVersion[] = [];
+    for (const key of keys) {
+      const id = key.slice(prefix.length);
+      const timestamp = versionTimestamp(id);
+      if (timestamp) found.push({ id, timestamp });
+    }
+    return found.reverse();
+  }
+
+  /** Reads one specific past version without disturbing the cached current one. */
+  async getVersion(bookId: string, versionId: string): Promise<GncXmlDocument | null> {
+    return this.loadKey(`${versionPrefix(this.tenantId, bookId)}${versionId}`);
+  }
+
+  /**
+   * Makes an old version current again by saving a fresh copy of it --
+   * non-destructive: the restore itself becomes a new version, so the
+   * version being restored *from* is never lost either.
+   */
+  async restore(
+    bookId: string,
+    versionId: string,
+    now: string,
+  ): Promise<GncXmlDocument | null> {
+    const document = await this.getVersion(bookId, versionId);
+    if (!document) return null;
+    await this.save(bookId, document, now);
+    return document;
+  }
+
+  private async loadKey(key: string): Promise<GncXmlDocument | null> {
+    const object = await this.bucket.get(key);
     if (!object) return null;
     const encrypted = new Uint8Array(await object.arrayBuffer());
     const gzipped = await decryptBookBytes(this.masterKey, this.tenantId, encrypted);
     const xml = new TextDecoder().decode(await gunzip(gzipped));
-    const document = GncXmlDocument.parse(xml);
-    this.cache.set(bookId, document);
-    return document;
+    return GncXmlDocument.parse(xml);
   }
 
   /** Replaces the whole book (a new company, or an import) with a fresh document. */

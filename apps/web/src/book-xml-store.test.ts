@@ -172,6 +172,80 @@ describe("BookXmlStore", () => {
     expect(bucket.size).toBe(30);
   });
 
+  it("lists versions newest first, with timestamps matching what was saved", async () => {
+    const bucket = new FakeR2Bucket();
+    const theStore = store(bucket);
+    const document = await theStore.replace(
+      "book-1",
+      snapshot(),
+      "2026-01-15T00:00:00.000Z",
+    );
+    await theStore.save("book-1", document, "2026-01-16T00:00:00.000Z");
+    await theStore.save("book-1", document, "2026-01-17T00:00:00.000Z");
+
+    const versions = await theStore.versions("book-1");
+    expect(versions.map((version) => version.timestamp)).toEqual([
+      "2026-01-17T00:00:00.000Z",
+      "2026-01-16T00:00:00.000Z",
+      "2026-01-15T00:00:00.000Z",
+    ]);
+  });
+
+  it("getVersion reads a past version without disturbing the current one", async () => {
+    const bucket = new FakeR2Bucket();
+    const theStore = store(bucket);
+    const original = await theStore.replace(
+      "book-1",
+      snapshot(),
+      "2026-01-15T00:00:00.000Z",
+    );
+    const [oldestVersion] = (await theStore.versions("book-1")).slice(-1);
+    if (!oldestVersion) throw new Error("expected at least one version");
+
+    original.createAccount(
+      {
+        name: "Rent",
+        type: "EXPENSE",
+        parentGuid: null,
+        commodity: { space: "CURRENCY", id: "USD" },
+      },
+      guidFrom("e".repeat(32)),
+    );
+    await theStore.save("book-1", original, "2026-01-16T00:00:00.000Z");
+
+    const past = await theStore.getVersion("book-1", oldestVersion.id);
+    expect(past?.accounts().some((account) => account.name === "Rent")).toBe(false);
+
+    const current = await theStore.get("book-1");
+    expect(current?.accounts().some((account) => account.name === "Rent")).toBe(true);
+  });
+
+  it("restore brings back an old version's content as a new, non-destructive version", async () => {
+    const bucket = new FakeR2Bucket();
+    const theStore = store(bucket);
+    await theStore.replace("book-1", snapshot(), "2026-01-15T00:00:00.000Z");
+    const [originalVersion] = await theStore.versions("book-1");
+    if (!originalVersion) throw new Error("expected at least one version");
+
+    const corrupted = await theStore.get("book-1");
+    if (!corrupted) throw new Error("expected book-1 to exist");
+    corrupted.deleteAccount("b".repeat(32));
+    await theStore.save("book-1", corrupted, "2026-01-16T00:00:00.000Z");
+    expect((await theStore.get("book-1"))?.account("b".repeat(32))).toBeUndefined();
+
+    const restored = await theStore.restore(
+      "book-1",
+      originalVersion.id,
+      "2026-01-17T00:00:00.000Z",
+    );
+    expect(restored?.account("b".repeat(32))?.name).toBe("Bank");
+    expect((await theStore.get("book-1"))?.account("b".repeat(32))?.name).toBe("Bank");
+
+    // Non-destructive: all three versions (original, corrupted, restore) still exist.
+    const versions = await theStore.versions("book-1");
+    expect(versions).toHaveLength(3);
+  });
+
   it("delete removes every version and the cache entry", async () => {
     const bucket = new FakeR2Bucket();
     const theStore = store(bucket);

@@ -327,6 +327,8 @@ export class Book {
     app.get("/app/setup", (c) => this.setupPage(c, "", c.req.query("token") ?? ""));
     app.post("/app/setup", (c) => this.setup(c));
     app.get("/app/settings", (c) => this.settingsPage(c));
+    app.get("/app/settings/versions", (c) => this.versionsPage(c));
+    app.post("/app/settings/versions/:id/restore", (c) => this.restoreVersion(c));
     app.get("/app/books", (c) => this.booksPage(c));
     app.post("/app/books", (c) => this.createBook(c));
     app.post("/app/books/:id/select", (c) => this.selectBook(c));
@@ -2060,11 +2062,63 @@ ${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join
 <input id="book-name" name="name" type="text" required maxlength="200" value="${escapeHtml(book.name)}">
 <button type="submit" class="secondary">Rename company</button>
 </form>
+<p><a href="/app/settings/versions">Backups and version history</a></p>
 <p>Two-factor authentication is enabled.</p>
 <form method="post" action="/app/logout"><button type="submit">Sign out</button></form>`,
       ),
       200,
     );
+  }
+
+  /**
+   * Every save writes a new encrypted R2 object rather than overwriting, so
+   * this lists the real history of a book and lets the owner roll back to
+   * any of them if the current version looks wrong or corrupted.
+   */
+  private async versionsPage(c: BookContext, notice = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const versions = await this.store.versions(bookId);
+    const rows = versions
+      .map((version, index) => {
+        const label = index === 0 ? ' <span class="chip">Current</span>' : "";
+        return `<li class="card" style="margin-bottom:0.5rem">
+<span>${escapeHtml(version.timestamp)}</span>${label}
+${
+  index === 0
+    ? ""
+    : `<form method="post" action="/app/settings/versions/${escapeHtml(encodeURIComponent(version.id))}/restore">
+<button type="submit" class="secondary">Restore this version</button>
+</form>`
+}
+</li>`;
+      })
+      .join("");
+    return c.html(
+      this.appPage(
+        "Backups and version history",
+        `<h1>Backups and version history</h1>
+<p class="muted">Every save keeps the version before it. Restoring copies an old version back as the newest one -- nothing is deleted, so you can always change your mind again.</p>
+${notice ? `<p class="muted">${escapeHtml(notice)}</p>` : ""}
+<ul style="list-style:none;padding:0">${rows || `<p class="muted">No versions yet.</p>`}</ul>
+<p><a href="/app/settings">Back to settings</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async restoreVersion(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const id = decodeURIComponent(c.req.param("id") ?? "");
+    const restored = await this.store.restore(bookId, id, nowIso());
+    if (!restored) return c.text("That version no longer exists", 404);
+    return c.redirect("/app/settings/versions");
   }
 
   private async logout(c: BookContext): Promise<Response> {
