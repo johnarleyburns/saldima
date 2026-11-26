@@ -105,7 +105,7 @@ export async function readBookSnapshot(
   return parseGnuCashXml(xml);
 }
 
-interface XmlNode {
+export interface XmlNode {
   readonly name: string;
   readonly attributes: Readonly<Record<string, string>>;
   readonly children: XmlNode[];
@@ -187,20 +187,23 @@ export function parseXml(xml: string): XmlNode {
   return root;
 }
 
-function local(name: string): string {
+export function local(name: string): string {
   const colon = name.lastIndexOf(":");
   return colon === -1 ? name : name.slice(colon + 1);
 }
 
-function children(node: XmlNode, localName: string): XmlNode[] {
+export function children(node: XmlNode, localName: string): XmlNode[] {
   return node.children.filter((child) => local(child.name) === localName);
 }
 
-function first(node: XmlNode, localName: string): XmlNode | undefined {
+export function first(node: XmlNode, localName: string): XmlNode | undefined {
   return children(node, localName)[0];
 }
 
-function findNode(nodes: readonly XmlNode[], localName: string): XmlNode | undefined {
+export function findNode(
+  nodes: readonly XmlNode[],
+  localName: string,
+): XmlNode | undefined {
   for (const node of nodes) {
     if (local(node.name) === localName) return node;
     const found = findNode(node.children, localName);
@@ -209,11 +212,11 @@ function findNode(nodes: readonly XmlNode[], localName: string): XmlNode | undef
   return undefined;
 }
 
-function text(node: XmlNode | undefined): string {
+export function text(node: XmlNode | undefined): string {
   return (node?.text ?? "").trim();
 }
 
-function rational(value: string): Money {
+export function rational(value: string): Money {
   const [num, denom] = value.split("/");
   if (!num || !denom) throw new BookFormatError(`bad rational ${value}`);
   return money(BigInt(num), BigInt(denom));
