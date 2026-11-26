@@ -78,6 +78,96 @@ export interface XmlTransaction {
   readonly num: string;
   readonly description: string;
   readonly splits: readonly XmlSplit[];
+  /**
+   * GnuCash's "Associate File/Location": an `assoc_uri` slot. Saldima
+   * writes a path relative to the book's own storage (so it never depends
+   * on where that storage physically lives), but reads whatever is there.
+   */
+  readonly docLink: string | null;
+}
+
+/** A GnuCash `GncCustomer` business object: a billing contact for invoices. */
+export interface XmlCustomer {
+  readonly guid: string;
+  readonly name: string;
+  readonly customerNumber: string;
+  readonly addressName: string;
+  readonly addressLine1: string;
+  readonly addressLine2: string;
+  readonly phone: string;
+  readonly email: string;
+  readonly notes: string;
+  readonly active: boolean;
+}
+
+export interface CreateCustomerInput {
+  readonly name: string;
+  readonly customerNumber?: string;
+  readonly addressName?: string;
+  readonly addressLine1?: string;
+  readonly addressLine2?: string;
+  readonly phone?: string;
+  readonly email?: string;
+  readonly notes?: string;
+  readonly currency: CommodityRef;
+}
+
+export interface UpdateCustomerInput {
+  readonly name?: string;
+  readonly customerNumber?: string;
+  readonly addressName?: string;
+  readonly addressLine1?: string;
+  readonly addressLine2?: string;
+  readonly phone?: string;
+  readonly email?: string;
+  readonly notes?: string;
+  readonly active?: boolean;
+}
+
+/** One line on an invoice: a `GncEntry` business object. */
+export interface XmlInvoiceEntry {
+  readonly guid: string;
+  readonly invoiceGuid: string;
+  readonly date: string;
+  readonly description: string;
+  readonly quantity: Money;
+  readonly unitPrice: Money;
+  readonly incomeAccountGuid: string;
+}
+
+export interface CreateInvoiceEntryInput {
+  readonly invoiceGuid: string;
+  readonly date: string;
+  readonly description: string;
+  readonly quantity: Money;
+  readonly unitPrice: Money;
+  readonly incomeAccountGuid: string;
+}
+
+/**
+ * A GnuCash `GncInvoice` business object. `datePosted === null` means it
+ * is still a draft -- GnuCash's own distinction between an open and a
+ * posted invoice; posting is the one-way action that creates the real
+ * receivable/income transaction behind it.
+ */
+export interface XmlInvoice {
+  readonly guid: string;
+  readonly invoiceNumber: string;
+  readonly customerGuid: string;
+  readonly dateOpened: string;
+  readonly datePosted: string | null;
+  readonly notes: string;
+  readonly active: boolean;
+  readonly postedTransactionGuid: string | null;
+  readonly receivableAccountGuid: string | null;
+}
+
+export interface CreateInvoiceInput {
+  readonly customerGuid: string;
+  readonly invoiceNumber: string;
+  readonly dateOpened: string;
+  readonly notes?: string;
+  readonly currency: CommodityRef;
 }
 
 export interface CreateAccountInput {
@@ -283,6 +373,8 @@ export class GncXmlDocument {
   private readonly book: XmlNode;
   private readonly accountNodes = new Map<string, XmlNode>();
   private readonly transactionNodes = new Map<string, XmlNode>();
+  private readonly customerNodes = new Map<string, XmlNode>();
+  private readonly invoiceNodes = new Map<string, XmlNode>();
 
   private constructor(root: XmlNode, book: XmlNode) {
     this.root = root;
@@ -300,6 +392,8 @@ export class GncXmlDocument {
   private reindex(): void {
     this.accountNodes.clear();
     this.transactionNodes.clear();
+    this.customerNodes.clear();
+    this.invoiceNodes.clear();
     for (const accountNode of children(this.book, "account")) {
       const guid = decoded(first(accountNode, "id"));
       if (guid) this.accountNodes.set(guid, accountNode);
@@ -307,6 +401,14 @@ export class GncXmlDocument {
     for (const transactionNode of children(this.book, "transaction")) {
       const guid = decoded(first(transactionNode, "id"));
       if (guid) this.transactionNodes.set(guid, transactionNode);
+    }
+    for (const customerNode of children(this.book, "GncCustomer")) {
+      const guid = decoded(first(customerNode, "guid"));
+      if (guid) this.customerNodes.set(guid, customerNode);
+    }
+    for (const invoiceNode of children(this.book, "GncInvoice")) {
+      const guid = decoded(first(invoiceNode, "guid"));
+      if (guid) this.invoiceNodes.set(guid, invoiceNode);
     }
   }
 
@@ -470,6 +572,12 @@ export class GncXmlDocument {
         };
       },
     );
+    const slots = first(transactionNode, "slots");
+    const docLinkSlot = slots
+      ? children(slots, "slot").find(
+          (slot) => decoded(first(slot, "key")) === "assoc_uri",
+        )
+      : undefined;
     return {
       guid: decoded(first(transactionNode, "id")),
       currency: readCommodityRef(transactionNode, "currency"),
@@ -478,6 +586,7 @@ export class GncXmlDocument {
       num: decoded(first(transactionNode, "num")),
       description: decoded(first(transactionNode, "description")),
       splits,
+      docLink: docLinkSlot ? decoded(first(docLinkSlot, "value")) : null,
     };
   }
 
@@ -580,6 +689,275 @@ export class GncXmlDocument {
     } else if (existingDate) {
       removeChild(splitNode, existingDate);
     }
+  }
+
+  /**
+   * Sets or clears a transaction's "Associate File/Location" --
+   * `assoc_uri`, the same slot desktop GnuCash's own right-click action
+   * writes. `uri = null` removes it.
+   */
+  setTransactionDocLink(transactionGuid: string, uri: string | null): void {
+    const transactionNode = this.transactionNodes.get(transactionGuid);
+    if (!transactionNode) {
+      throw new GncXmlError(`unknown transaction ${transactionGuid}`);
+    }
+    const slots = findOrCreateSlots(transactionNode, "trn");
+    const existing = children(slots, "slot").find(
+      (slot) => decoded(first(slot, "key")) === "assoc_uri",
+    );
+    if (uri) {
+      if (existing) {
+        setLeafText(existing, "slot:value", uri);
+      } else {
+        slots.children.push(
+          node("slot", {}, [
+            leaf("slot:key", "assoc_uri"),
+            leaf("slot:value", uri, { type: "string" }),
+          ]),
+        );
+      }
+    } else if (existing) {
+      removeChild(slots, existing);
+    }
+    if (slots.children.length === 0) removeChild(transactionNode, slots);
+  }
+
+  // MARK: customers
+
+  customers(): XmlCustomer[] {
+    return [...this.customerNodes.values()].map((node) => this.readCustomer(node));
+  }
+
+  customer(guid: string): XmlCustomer | undefined {
+    const customerNode = this.customerNodes.get(guid);
+    return customerNode ? this.readCustomer(customerNode) : undefined;
+  }
+
+  private readCustomer(customerNode: XmlNode): XmlCustomer {
+    const address = first(customerNode, "addr");
+    const addressField = (name: string): string =>
+      address ? decoded(first(address, name)) : "";
+    return {
+      guid: decoded(first(customerNode, "guid")),
+      name: decoded(first(customerNode, "name")),
+      customerNumber: decoded(first(customerNode, "id")),
+      addressName: addressField("name"),
+      addressLine1: addressField("addr1"),
+      addressLine2: addressField("addr2"),
+      phone: addressField("phone"),
+      email: addressField("email"),
+      notes: decoded(first(customerNode, "notes")),
+      active: decoded(first(customerNode, "active")) !== "0",
+    };
+  }
+
+  createCustomer(input: CreateCustomerInput, guid: Guid): XmlCustomer {
+    if (this.customerNodes.has(guid)) {
+      throw new GncXmlError(`duplicate customer ${guid}`);
+    }
+    const addressChildren = [
+      leaf("addr:name", input.addressName ?? ""),
+      leaf("addr:addr1", input.addressLine1 ?? ""),
+      leaf("addr:addr2", input.addressLine2 ?? ""),
+      leaf("addr:phone", input.phone ?? ""),
+      leaf("addr:email", input.email ?? ""),
+    ];
+    const customerNode = node("gnc:GncCustomer", { version: "2.0.0" }, [
+      guidNode("cust:guid", guid),
+      leaf("cust:name", input.name),
+      leaf("cust:id", input.customerNumber ?? ""),
+      node("cust:addr", { version: "2.0.0" }, addressChildren),
+      leaf("cust:notes", input.notes ?? ""),
+      leaf("cust:active", "1"),
+      commodityNode("cust:currency", input.currency),
+    ]);
+    this.book.children.push(customerNode);
+    this.customerNodes.set(guid, customerNode);
+    return this.readCustomer(customerNode);
+  }
+
+  updateCustomer(guid: string, patch: UpdateCustomerInput): XmlCustomer {
+    const customerNode = this.customerNodes.get(guid);
+    if (!customerNode) throw new GncXmlError(`unknown customer ${guid}`);
+    if (patch.name !== undefined) setLeafText(customerNode, "cust:name", patch.name);
+    if (patch.customerNumber !== undefined) {
+      setLeafText(customerNode, "cust:id", patch.customerNumber);
+    }
+    if (patch.notes !== undefined) setLeafText(customerNode, "cust:notes", patch.notes);
+    if (patch.active !== undefined) {
+      setLeafText(customerNode, "cust:active", patch.active ? "1" : "0");
+    }
+    const addressFields: Array<[keyof UpdateCustomerInput, string]> = [
+      ["addressName", "addr:name"],
+      ["addressLine1", "addr:addr1"],
+      ["addressLine2", "addr:addr2"],
+      ["phone", "addr:phone"],
+      ["email", "addr:email"],
+    ];
+    if (addressFields.some(([key]) => patch[key] !== undefined)) {
+      const address =
+        first(customerNode, "addr") ??
+        setOrCreateChild(customerNode, "addr", () =>
+          node("cust:addr", { version: "2.0.0" }),
+        );
+      for (const [key, tag] of addressFields) {
+        const value = patch[key];
+        if (value !== undefined) setLeafText(address, tag, String(value));
+      }
+    }
+    return this.readCustomer(customerNode);
+  }
+
+  deleteCustomer(guid: string): void {
+    const customerNode = this.customerNodes.get(guid);
+    if (!customerNode) return;
+    removeChild(this.book, customerNode);
+    this.customerNodes.delete(guid);
+  }
+
+  customerInUse(guid: string): boolean {
+    return this.invoices().some((invoice) => invoice.customerGuid === guid);
+  }
+
+  // MARK: invoices and entries
+
+  invoices(): XmlInvoice[] {
+    return [...this.invoiceNodes.values()].map((node) => this.readInvoice(node));
+  }
+
+  invoice(guid: string): XmlInvoice | undefined {
+    const invoiceNode = this.invoiceNodes.get(guid);
+    return invoiceNode ? this.readInvoice(invoiceNode) : undefined;
+  }
+
+  private readInvoice(invoiceNode: XmlNode): XmlInvoice {
+    const owner = first(invoiceNode, "owner");
+    return {
+      guid: decoded(first(invoiceNode, "guid")),
+      invoiceNumber: decoded(first(invoiceNode, "id")),
+      customerGuid: owner ? decoded(first(owner, "id")) : "",
+      dateOpened: decoded(nested(invoiceNode, "opened", "date")),
+      datePosted: first(invoiceNode, "posted")
+        ? decoded(nested(invoiceNode, "posted", "date"))
+        : null,
+      notes: decoded(first(invoiceNode, "notes")),
+      active: decoded(first(invoiceNode, "active")) !== "0",
+      postedTransactionGuid: first(invoiceNode, "posttxn")
+        ? decoded(first(invoiceNode, "posttxn"))
+        : null,
+      receivableAccountGuid: first(invoiceNode, "postacc")
+        ? decoded(first(invoiceNode, "postacc"))
+        : null,
+    };
+  }
+
+  /** Every line on one invoice, oldest first. */
+  invoiceEntries(invoiceGuid: string): XmlInvoiceEntry[] {
+    return children(this.book, "GncEntry")
+      .map((entryNode) => this.readEntry(entryNode))
+      .filter((entry): entry is XmlInvoiceEntry => entry?.invoiceGuid === invoiceGuid)
+      .sort((a, b) =>
+        a.date === b.date ? (a.guid < b.guid ? -1 : 1) : a.date < b.date ? -1 : 1,
+      );
+  }
+
+  private readEntry(entryNode: XmlNode): XmlInvoiceEntry | null {
+    const invoiceGuid = decoded(first(entryNode, "invoice"));
+    const incomeAccountGuid = decoded(first(entryNode, "i-acct"));
+    if (!invoiceGuid || !incomeAccountGuid) return null;
+    return {
+      guid: decoded(first(entryNode, "guid")),
+      invoiceGuid,
+      date: decoded(nested(entryNode, "date", "date")),
+      description: decoded(first(entryNode, "description")),
+      quantity: rational(text(first(entryNode, "qty"))),
+      unitPrice: rational(text(first(entryNode, "i-price"))),
+      incomeAccountGuid,
+    };
+  }
+
+  createInvoice(input: CreateInvoiceInput, guid: Guid): XmlInvoice {
+    if (this.invoiceNodes.has(guid)) {
+      throw new GncXmlError(`duplicate invoice ${guid}`);
+    }
+    const owner = node("invoice:owner", { version: "2.0.0" }, [
+      leaf("owner:type", "gncCustomer"),
+      guidNode("owner:id", input.customerGuid),
+    ]);
+    const invoiceNode = node("gnc:GncInvoice", { version: "2.0.0" }, [
+      guidNode("invoice:guid", guid),
+      leaf("invoice:id", input.invoiceNumber),
+      owner,
+      node("invoice:opened", {}, [leaf("ts:date", input.dateOpened)]),
+      leaf("invoice:notes", input.notes ?? ""),
+      leaf("invoice:active", "1"),
+      commodityNode("invoice:currency", input.currency),
+    ]);
+    this.book.children.push(invoiceNode);
+    this.invoiceNodes.set(guid, invoiceNode);
+    return this.readInvoice(invoiceNode);
+  }
+
+  /** Drafts only: a posted invoice is part of permanent ledger history. */
+  deleteInvoice(guid: string): void {
+    const invoiceNode = this.invoiceNodes.get(guid);
+    if (!invoiceNode) return;
+    for (const entryNode of children(this.book, "GncEntry")) {
+      if (decoded(first(entryNode, "invoice")) === guid)
+        removeChild(this.book, entryNode);
+    }
+    removeChild(this.book, invoiceNode);
+    this.invoiceNodes.delete(guid);
+  }
+
+  addInvoiceEntry(input: CreateInvoiceEntryInput, guid: Guid): XmlInvoiceEntry {
+    const entryNode = node("gnc:GncEntry", { version: "2.0.0" }, [
+      guidNode("entry:guid", guid),
+      node("entry:date", {}, [leaf("ts:date", input.date)]),
+      node("entry:entered", {}, [leaf("ts:date", input.date)]),
+      leaf("entry:description", input.description),
+      leaf("entry:qty", rationalText(input.quantity)),
+      guidNode("entry:i-acct", input.incomeAccountGuid),
+      leaf("entry:i-price", rationalText(input.unitPrice)),
+      leaf("entry:i-discount", "0/100"),
+      guidNode("entry:invoice", input.invoiceGuid),
+      leaf("entry:i-disc-type", "PERCENT"),
+      leaf("entry:i-disc-how", "PRETAX"),
+      leaf("entry:i-taxable", "0"),
+      leaf("entry:i-taxincluded", "0"),
+    ]);
+    this.book.children.push(entryNode);
+    const entry = this.readEntry(entryNode);
+    if (!entry) throw new GncXmlError("failed to build invoice entry");
+    return entry;
+  }
+
+  deleteInvoiceEntry(guid: string): void {
+    const entryNode = children(this.book, "GncEntry").find(
+      (candidate) => decoded(first(candidate, "guid")) === guid,
+    );
+    if (entryNode) removeChild(this.book, entryNode);
+  }
+
+  /**
+   * Marks a draft invoice posted: stamps the posted date, the real ledger
+   * transaction behind it, and the receivable account used -- matching
+   * desktop GnuCash's own "Post Invoice" action. The caller creates that
+   * transaction separately via `postTransaction`.
+   */
+  markInvoicePosted(
+    guid: string,
+    postedDate: string,
+    transactionGuid: string,
+    receivableAccountGuid: string,
+  ): void {
+    const invoiceNode = this.invoiceNodes.get(guid);
+    if (!invoiceNode) throw new GncXmlError(`unknown invoice ${guid}`);
+    invoiceNode.children.push(
+      node("invoice:posted", {}, [leaf("ts:date", postedDate)]),
+      guidNode("invoice:posttxn", transactionGuid),
+      guidNode("invoice:postacc", receivableAccountGuid),
+    );
   }
 
   /**

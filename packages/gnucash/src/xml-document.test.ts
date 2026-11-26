@@ -212,6 +212,139 @@ describe("GncXmlDocument", () => {
     ).toThrow(GncXmlError);
   });
 
+  it("attaches, reads and removes a receipt (GnuCash's doc-link) on a posted transaction", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-02-01 00:00:00 +0000",
+        dateEntered: "2026-02-01 00:00:00 +0000",
+        description: "Office supplies",
+        splits: [
+          { accountGuid: BANK, value: money(-4200n, 100n) },
+          { accountGuid: SALARY, value: money(4200n, 100n) },
+        ],
+      },
+      { transaction: txId, splits: splitIds },
+    );
+    expect(doc.transaction(txId)?.docLink).toBeNull();
+
+    doc.setTransactionDocLink(txId, "receipts/one.jpg");
+    expect(doc.transaction(txId)?.docLink).toBe("receipts/one.jpg");
+
+    const reparsed = GncXmlDocument.parse(doc.serialize());
+    expect(reparsed.transaction(txId)?.docLink).toBe("receipts/one.jpg");
+
+    doc.setTransactionDocLink(txId, null);
+    expect(doc.transaction(txId)?.docLink).toBeNull();
+
+    expect(() => doc.setTransactionDocLink(guidFrom("f".repeat(32)), "x")).toThrow(
+      GncXmlError,
+    );
+  });
+
+  it("creates a customer, an invoice with lines, and posts it as a real transaction", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const customerGuid = guidFrom("c".repeat(32));
+
+    const customer = doc.createCustomer(
+      {
+        name: "Acme Holdings",
+        customerNumber: "C-0001",
+        addressLine1: "1 Market St",
+        email: "billing@acme.test",
+        currency: USD,
+      },
+      customerGuid,
+    );
+    expect(customer.name).toBe("Acme Holdings");
+    expect(doc.customers()).toHaveLength(1);
+    expect(doc.customer(customerGuid)?.customerNumber).toBe("C-0001");
+
+    doc.updateCustomer(customerGuid, { name: "Acme Holdings LLC" });
+    expect(doc.customer(customerGuid)?.name).toBe("Acme Holdings LLC");
+
+    const invoiceGuid = guidFrom("d".repeat(32));
+    const invoice = doc.createInvoice(
+      {
+        customerGuid,
+        invoiceNumber: "INV-1001",
+        dateOpened: "2026-03-01",
+        notes: "March premium",
+        currency: USD,
+      },
+      invoiceGuid,
+    );
+    expect(invoice.datePosted).toBeNull();
+    expect(doc.invoices()).toHaveLength(1);
+
+    const lineGuid = guidFrom("e".repeat(32));
+    const entry = doc.addInvoiceEntry(
+      {
+        invoiceGuid,
+        date: "2026-03-01",
+        description: "Monthly premium",
+        quantity: money(1n, 1n),
+        unitPrice: money(25000n, 100n),
+        incomeAccountGuid: SALARY,
+      },
+      lineGuid,
+    );
+    expect(entry.unitPrice).toEqual(money(25000n, 100n));
+    expect(doc.invoiceEntries(invoiceGuid)).toHaveLength(1);
+
+    const txGuid = guidFrom("f".repeat(32));
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-03-01 00:00:00 +0000",
+        dateEntered: "2026-03-01 00:00:00 +0000",
+        description: "Invoice INV-1001",
+        splits: [
+          { accountGuid: BANK, value: money(25000n, 100n) },
+          { accountGuid: SALARY, value: money(-25000n, 100n) },
+        ],
+      },
+      {
+        transaction: txGuid,
+        splits: [guidFrom("1".repeat(32)), guidFrom("2".repeat(32))],
+      },
+    );
+    doc.markInvoicePosted(invoiceGuid, "2026-03-01", txGuid, BANK);
+
+    const posted = doc.invoice(invoiceGuid);
+    expect(posted?.datePosted).toBe("2026-03-01");
+    expect(posted?.postedTransactionGuid).toBe(txGuid);
+    expect(posted?.receivableAccountGuid).toBe(BANK);
+
+    const reparsed = GncXmlDocument.parse(doc.serialize());
+    expect(reparsed.customers()).toHaveLength(1);
+    expect(reparsed.invoices()).toHaveLength(1);
+    expect(reparsed.invoiceEntries(invoiceGuid)).toHaveLength(1);
+    expect(reparsed.invoice(invoiceGuid)?.datePosted).toBe("2026-03-01");
+
+    doc.deleteCustomer(customerGuid);
+    expect(doc.customer(customerGuid)).toBeUndefined();
+  });
+
+  it("refuses to delete a customer that still has invoices (checked by the caller)", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const customerGuid = guidFrom("c".repeat(32));
+    doc.createCustomer({ name: "Acme", currency: USD }, customerGuid);
+    const invoiceGuid = guidFrom("d".repeat(32));
+    doc.createInvoice(
+      { customerGuid, invoiceNumber: "INV-1", dateOpened: "2026-03-01", currency: USD },
+      invoiceGuid,
+    );
+    expect(doc.customerInUse(customerGuid)).toBe(true);
+
+    doc.deleteInvoice(invoiceGuid);
+    expect(doc.invoice(invoiceGuid)).toBeUndefined();
+    expect(doc.customerInUse(customerGuid)).toBe(false);
+  });
+
   it("rejects an unbalanced or under-specified transaction", async () => {
     const doc = GncXmlDocument.parse(await loadFixtureXml());
     expect(() =>
@@ -518,5 +651,192 @@ describe("GncXmlDocument", () => {
       reconcileState: "n",
       quantity: money(100n, 100n),
     });
+  });
+
+  it("reads and reconciles splits on a transaction with no trn:splits wrapper", () => {
+    const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:book="http://www.gnucash.org/XML/book" xmlns:trn="http://www.gnucash.org/XML/trn" xmlns:split="http://www.gnucash.org/XML/split">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"1".repeat(32)}</book:id>
+<gnc:transaction version="2.0.0">
+  <trn:id type="guid">${"2".repeat(32)}</trn:id>
+  <trn:description>Direct splits</trn:description>
+  <trn:split>
+    <split:id type="guid">${"3".repeat(32)}</split:id>
+    <split:value>100/100</split:value>
+    <split:account type="guid">${"4".repeat(32)}</split:account>
+  </trn:split>
+  <trn:split>
+    <split:id type="guid">${"5".repeat(32)}</split:id>
+    <split:value>-100/100</split:value>
+    <split:account type="guid">${"6".repeat(32)}</split:account>
+  </trn:split>
+</gnc:transaction>
+</gnc:book>
+</gnc-v2>`);
+    const txId = "2".repeat(32);
+    const splitId = "3".repeat(32);
+    expect(doc.transaction(txId)?.splits).toHaveLength(2);
+
+    doc.setSplitReconcileState(txId, splitId, "y", "2026-04-01 00:00:00 +0000");
+    doc.setSplitReconcileState(txId, splitId, "y", "2026-04-02 00:00:00 +0000");
+    expect(doc.transaction(txId)?.splits[0]?.reconcileDate).toBe(
+      "2026-04-02 00:00:00 +0000",
+    );
+  });
+
+  it("updates an existing doc-link in place, and clearing an absent one is a no-op", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-02-01 00:00:00 +0000",
+        dateEntered: "2026-02-01 00:00:00 +0000",
+        description: "Office supplies",
+        splits: [
+          { accountGuid: BANK, value: money(-4200n, 100n) },
+          { accountGuid: SALARY, value: money(4200n, 100n) },
+        ],
+      },
+      { transaction: txId, splits: splitIds },
+    );
+
+    doc.setTransactionDocLink(txId, null);
+    expect(doc.transaction(txId)?.docLink).toBeNull();
+
+    doc.setTransactionDocLink(txId, "receipts/one.jpg");
+    doc.setTransactionDocLink(txId, "receipts/two.jpg");
+    expect(doc.transaction(txId)?.docLink).toBe("receipts/two.jpg");
+  });
+
+  it("rejects a duplicate transaction id and a split/id count mismatch", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    const input = {
+      currency: USD,
+      datePosted: "2026-02-01 00:00:00 +0000",
+      dateEntered: "2026-02-01 00:00:00 +0000",
+      description: "Coffee",
+      splits: [
+        { accountGuid: BANK, value: money(-500n, 100n) },
+        { accountGuid: SALARY, value: money(500n, 100n) },
+      ],
+    };
+    doc.postTransaction(input, { transaction: txId, splits: splitIds });
+
+    expect(() =>
+      doc.postTransaction(input, { transaction: txId, splits: splitIds }),
+    ).toThrow(GncXmlError);
+    expect(() =>
+      doc.postTransaction(input, {
+        transaction: guidFrom("5".repeat(32)),
+        splits: [guidFrom("6".repeat(32))],
+      }),
+    ).toThrow(GncXmlError);
+  });
+
+  it("no-ops deleting an unknown account, and clears both hidden and placeholder together", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    expect(() => doc.deleteAccount(guidFrom("f".repeat(32)))).not.toThrow();
+
+    const guid = guidFrom("9".repeat(32));
+    doc.createAccount(
+      {
+        name: "Petty cash",
+        type: "CASH",
+        parentGuid: null,
+        commodity: USD,
+        hidden: true,
+        placeholder: true,
+      },
+      guid,
+    );
+    doc.updateAccount(guid, { parentGuid: BANK });
+    expect(doc.account(guid)?.parentGuid).toBe(BANK);
+
+    doc.updateAccount(guid, { hidden: true });
+    expect(doc.account(guid)).toMatchObject({ hidden: true, placeholder: true });
+    doc.updateAccount(guid, { placeholder: false });
+    expect(doc.account(guid)).toMatchObject({ hidden: true, placeholder: false });
+    doc.updateAccount(guid, { hidden: false, placeholder: false });
+    expect(doc.account(guid)).toMatchObject({ hidden: false, placeholder: false });
+  });
+
+  it("adds the first commodity to a book that has none yet", () => {
+    const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:book="http://www.gnucash.org/XML/book">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"3".repeat(32)}</book:id>
+</gnc:book>
+</gnc-v2>`);
+    expect(doc.commodities()).toHaveLength(0);
+    doc.ensureCommodity(USD);
+    expect(doc.commodities()).toHaveLength(1);
+  });
+
+  it("updates individual customer fields independently, including on a customer with no address block", () => {
+    const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:cust="http://www.gnucash.org/XML/cust" xmlns:book="http://www.gnucash.org/XML/book" xmlns:cmdty="http://www.gnucash.org/XML/cmdty">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"7".repeat(32)}</book:id>
+<gnc:GncCustomer version="2.0.0">
+  <cust:guid type="guid">${"8".repeat(32)}</cust:guid>
+  <cust:name>No Address LLC</cust:name>
+  <cust:id>C-0002</cust:id>
+  <cust:active>1</cust:active>
+</gnc:GncCustomer>
+</gnc:book>
+</gnc-v2>`);
+    const guid = "8".repeat(32);
+    expect(doc.customer(guid)?.addressLine1).toBe("");
+
+    doc.updateCustomer(guid, { customerNumber: "C-0003" });
+    expect(doc.customer(guid)?.customerNumber).toBe("C-0003");
+    expect(doc.customer(guid)?.name).toBe("No Address LLC");
+
+    doc.updateCustomer(guid, { notes: "VIP", active: false });
+    expect(doc.customer(guid)).toMatchObject({ notes: "VIP", active: false });
+
+    doc.updateCustomer(guid, { addressLine1: "500 Market St" });
+    expect(doc.customer(guid)?.addressLine1).toBe("500 Market St");
+
+    expect(() => doc.updateCustomer(guidFrom("f".repeat(32)), { name: "x" })).toThrow(
+      GncXmlError,
+    );
+  });
+
+  it("no-ops deleting an unknown customer, invoice or invoice entry", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    expect(() => doc.deleteCustomer(guidFrom("f".repeat(32)))).not.toThrow();
+    expect(() => doc.deleteInvoice(guidFrom("f".repeat(32)))).not.toThrow();
+    expect(() => doc.deleteInvoiceEntry(guidFrom("f".repeat(32)))).not.toThrow();
+  });
+
+  it("reads an invoice missing its owner and posting fields, and filters out a malformed entry", () => {
+    const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:invoice="http://www.gnucash.org/XML/invoice" xmlns:entry="http://www.gnucash.org/XML/entry" xmlns:book="http://www.gnucash.org/XML/book" xmlns:ts="http://www.gnucash.org/XML/ts">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"9".repeat(32)}</book:id>
+<gnc:GncInvoice version="2.0.0">
+  <invoice:guid type="guid">${"a".repeat(32)}</invoice:guid>
+  <invoice:id>INV-0</invoice:id>
+  <invoice:opened><ts:date>2026-01-01</ts:date></invoice:opened>
+  <invoice:active>1</invoice:active>
+</gnc:GncInvoice>
+<gnc:GncEntry version="2.0.0">
+  <entry:guid type="guid">${"b".repeat(32)}</entry:guid>
+</gnc:GncEntry>
+</gnc:book>
+</gnc-v2>`);
+    const invoiceGuid = "a".repeat(32);
+    const invoice = doc.invoice(invoiceGuid);
+    expect(invoice?.customerGuid).toBe("");
+    expect(invoice?.datePosted).toBeNull();
+    expect(invoice?.postedTransactionGuid).toBeNull();
+    expect(invoice?.receivableAccountGuid).toBeNull();
+    expect(doc.invoiceEntries(invoiceGuid)).toHaveLength(0);
   });
 });
