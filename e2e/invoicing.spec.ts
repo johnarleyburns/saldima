@@ -124,6 +124,52 @@ test("invoicing: add a client, create an invoice, add a line and post it", async
   await expect(page.getByText("Invoice INV-1001")).toBeVisible();
 });
 
+test("bills: add a vendor, create a bill, add a line and post it", async ({
+  page,
+}, testInfo) => {
+  const book = "hank";
+  const email = `hank-${testInfo.project.name}@example.test`;
+  await setUpOwnerAndSignIn(page, testInfo, book, email);
+
+  await addAccount(page, testInfo, book, "E2E Payable", "PAYABLE");
+  await addAccount(page, testInfo, book, "E2E Office Expense", "EXPENSE");
+
+  await page.goto(bookUrl(book, testInfo, "/app/vendors/new"));
+  await page.getByLabel("Name").fill("Staples Supply Co");
+  await page.getByLabel("Email").fill("ap@staples-supply.test");
+  await page.getByRole("button", { name: "Add vendor" }).click();
+  await expect(page.getByText("Staples Supply Co")).toBeVisible();
+
+  await page.goto(bookUrl(book, testInfo, "/app/bills/new"));
+  await page.getByLabel("Vendor").selectOption({ label: "Staples Supply Co" });
+  await page.getByLabel("Bill number").fill("BILL-2001");
+  await page.getByLabel("Date opened").fill("2026-03-01");
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("heading", { name: "BILL-2001" })).toBeVisible();
+  await expect(page.getByText("Staples Supply Co")).toBeVisible();
+
+  await page.getByLabel("Description").fill("Printer paper");
+  await page.getByLabel("Date", { exact: true }).fill("2026-03-01");
+  await page.getByLabel("Quantity").fill("1");
+  await page.getByLabel("Unit price").fill("60.00");
+  await page.getByLabel("Expense account").selectOption({ label: "E2E Office Expense" });
+  await page.getByRole("button", { name: "Add line" }).click();
+  await expect(page.getByText("Printer paper")).toBeVisible();
+  await expect(page.getByText("Total: 60.00")).toBeVisible();
+
+  await page.getByLabel("Pay from").selectOption({ label: "E2E Payable" });
+  await page.getByLabel("Posted date").fill("2026-03-01");
+  await page.getByRole("button", { name: "Post bill" }).click();
+  await expect(page.getByText("Posted 2026-03-01")).toBeVisible();
+
+  // A posted bill can no longer be edited or deleted.
+  await expect(page.getByRole("button", { name: "Add line" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Delete draft" })).toHaveCount(0);
+
+  await page.goto(bookUrl(book, testInfo, "/app/journal"));
+  await expect(page.getByText("Bill BILL-2001")).toBeVisible();
+});
+
 test("receipts: capturing a receipt posts an expense and shows the receipt image", async ({
   page,
 }, testInfo) => {

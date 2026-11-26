@@ -345,6 +345,115 @@ describe("GncXmlDocument", () => {
     expect(doc.customerInUse(customerGuid)).toBe(false);
   });
 
+  it("creates a vendor, a bill with lines, and posts it as a real transaction", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const vendorGuid = guidFrom("1".repeat(32));
+
+    const vendor = doc.createVendor(
+      {
+        name: "Acme Supplies",
+        vendorNumber: "V-0001",
+        email: "ap@acme.test",
+        currency: USD,
+      },
+      vendorGuid,
+    );
+    expect(vendor.name).toBe("Acme Supplies");
+    expect(doc.vendors()).toHaveLength(1);
+    expect(doc.vendor(vendorGuid)?.vendorNumber).toBe("V-0001");
+
+    doc.updateVendor(vendorGuid, { name: "Acme Supplies Inc" });
+    expect(doc.vendor(vendorGuid)?.name).toBe("Acme Supplies Inc");
+
+    const billGuid = guidFrom("2".repeat(32));
+    const bill = doc.createBill(
+      { vendorGuid, billNumber: "BILL-1001", dateOpened: "2026-03-01", currency: USD },
+      billGuid,
+    );
+    expect(bill.datePosted).toBeNull();
+    expect(doc.bills()).toHaveLength(1);
+    // A bill shares GncInvoice with customer invoices but must never show
+    // up as one, and vice versa.
+    expect(doc.invoices()).toHaveLength(0);
+
+    const lineGuid = guidFrom("3".repeat(32));
+    const entry = doc.addBillEntry(
+      {
+        billGuid,
+        date: "2026-03-01",
+        description: "Office supplies",
+        quantity: money(1n, 1n),
+        unitPrice: money(8000n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      lineGuid,
+    );
+    expect(entry.unitPrice).toEqual(money(8000n, 100n));
+    expect(doc.billEntries(billGuid)).toHaveLength(1);
+
+    const txGuid = guidFrom("4".repeat(32));
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-03-01 00:00:00 +0000",
+        dateEntered: "2026-03-01 00:00:00 +0000",
+        description: "Bill BILL-1001",
+        splits: [
+          { accountGuid: SALARY, value: money(8000n, 100n) },
+          { accountGuid: BANK, value: money(-8000n, 100n) },
+        ],
+      },
+      {
+        transaction: txGuid,
+        splits: [guidFrom("5".repeat(32)), guidFrom("6".repeat(32))],
+      },
+    );
+    doc.markBillPosted(billGuid, "2026-03-01", txGuid, BANK);
+
+    const posted = doc.bill(billGuid);
+    expect(posted?.datePosted).toBe("2026-03-01");
+    expect(posted?.postedTransactionGuid).toBe(txGuid);
+    expect(posted?.payableAccountGuid).toBe(BANK);
+
+    const reparsed = GncXmlDocument.parse(doc.serialize());
+    expect(reparsed.vendors()).toHaveLength(1);
+    expect(reparsed.bills()).toHaveLength(1);
+    expect(reparsed.billEntries(billGuid)).toHaveLength(1);
+    expect(reparsed.bill(billGuid)?.datePosted).toBe("2026-03-01");
+    expect(reparsed.invoices()).toHaveLength(0);
+
+    doc.deleteVendor(vendorGuid);
+    expect(doc.vendor(vendorGuid)).toBeUndefined();
+  });
+
+  it("refuses to delete a vendor that still has bills (checked by the caller)", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const vendorGuid = guidFrom("1".repeat(32));
+    doc.createVendor({ name: "Acme", currency: USD }, vendorGuid);
+    const billGuid = guidFrom("2".repeat(32));
+    doc.createBill(
+      { vendorGuid, billNumber: "BILL-1", dateOpened: "2026-03-01", currency: USD },
+      billGuid,
+    );
+    expect(doc.vendorInUse(vendorGuid)).toBe(true);
+
+    doc.deleteBill(billGuid);
+    expect(doc.bill(billGuid)).toBeUndefined();
+    expect(doc.vendorInUse(vendorGuid)).toBe(false);
+  });
+
+  it("no-ops deleting an unknown vendor, bill or bill entry, and rejects unknown ids", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const unknown = guidFrom("f".repeat(32));
+    expect(() => doc.deleteVendor(unknown)).not.toThrow();
+    expect(() => doc.deleteBill(unknown)).not.toThrow();
+    expect(() => doc.deleteBillEntry(unknown)).not.toThrow();
+    expect(() => doc.updateVendor(unknown, { name: "x" })).toThrow(GncXmlError);
+    expect(() => doc.markBillPosted(unknown, "2026-01-01", unknown, unknown)).toThrow(
+      GncXmlError,
+    );
+  });
+
   it("rejects an unbalanced or under-specified transaction", async () => {
     const doc = GncXmlDocument.parse(await loadFixtureXml());
     expect(() =>
@@ -838,5 +947,394 @@ describe("GncXmlDocument", () => {
     expect(invoice?.postedTransactionGuid).toBeNull();
     expect(invoice?.receivableAccountGuid).toBeNull();
     expect(doc.invoiceEntries(invoiceGuid)).toHaveLength(0);
+  });
+
+  it("rejects a duplicate invoice, deletes an entry directly, and clears only its own invoice's entries", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const customerGuid = guidFrom("c".repeat(32));
+    doc.createCustomer({ name: "Acme", currency: USD }, customerGuid);
+    const invoiceGuid = guidFrom("d".repeat(32));
+    doc.createInvoice(
+      { customerGuid, invoiceNumber: "INV-1", dateOpened: "2026-03-01", currency: USD },
+      invoiceGuid,
+    );
+    expect(() =>
+      doc.createInvoice(
+        {
+          customerGuid,
+          invoiceNumber: "INV-2",
+          dateOpened: "2026-03-02",
+          currency: USD,
+        },
+        invoiceGuid,
+      ),
+    ).toThrow(GncXmlError);
+
+    const otherInvoiceGuid = guidFrom("e".repeat(32));
+    doc.createInvoice(
+      { customerGuid, invoiceNumber: "INV-3", dateOpened: "2026-03-01", currency: USD },
+      otherInvoiceGuid,
+    );
+    const keptLine = doc.addInvoiceEntry(
+      {
+        invoiceGuid: otherInvoiceGuid,
+        date: "2026-03-01",
+        description: "Kept",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        incomeAccountGuid: SALARY,
+      },
+      guidFrom("f".repeat(32)),
+    );
+    const removedLine = doc.addInvoiceEntry(
+      {
+        invoiceGuid,
+        date: "2026-03-01",
+        description: "Removed",
+        quantity: money(1n, 1n),
+        unitPrice: money(200n, 100n),
+        incomeAccountGuid: SALARY,
+      },
+      guidFrom("1".repeat(32)),
+    );
+    doc.deleteInvoiceEntry(removedLine.guid);
+    expect(doc.invoiceEntries(invoiceGuid)).toHaveLength(0);
+    expect(doc.invoiceEntries(otherInvoiceGuid)).toHaveLength(1);
+
+    // Deleting an invoice only clears its own entries, not a sibling's.
+    doc.deleteInvoice(invoiceGuid);
+    expect(doc.invoiceEntries(otherInvoiceGuid).map((entry) => entry.guid)).toEqual([
+      keptLine.guid,
+    ]);
+
+    expect(() =>
+      doc.markInvoicePosted(
+        guidFrom("f".repeat(32)),
+        "2026-01-01",
+        invoiceGuid,
+        invoiceGuid,
+      ),
+    ).toThrow(GncXmlError);
+  });
+
+  it("sorts invoice entries by date, then by guid on the same day", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const customerGuid = guidFrom("c".repeat(32));
+    doc.createCustomer({ name: "Acme", currency: USD }, customerGuid);
+    const invoiceGuid = guidFrom("d".repeat(32));
+    doc.createInvoice(
+      { customerGuid, invoiceNumber: "INV-1", dateOpened: "2026-03-01", currency: USD },
+      invoiceGuid,
+    );
+    const second = doc.addInvoiceEntry(
+      {
+        invoiceGuid,
+        date: "2026-03-05",
+        description: "Second day",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        incomeAccountGuid: SALARY,
+      },
+      guidFrom("9".repeat(32)),
+    );
+    const sameDayLater = doc.addInvoiceEntry(
+      {
+        invoiceGuid,
+        date: "2026-03-01",
+        description: "Same day, higher guid",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        incomeAccountGuid: SALARY,
+      },
+      guidFrom("2".repeat(32)),
+    );
+    const sameDayEarlier = doc.addInvoiceEntry(
+      {
+        invoiceGuid,
+        date: "2026-03-01",
+        description: "Same day, lower guid",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        incomeAccountGuid: SALARY,
+      },
+      guidFrom("1".repeat(32)),
+    );
+    expect(doc.invoiceEntries(invoiceGuid).map((entry) => entry.guid)).toEqual([
+      sameDayEarlier.guid,
+      sameDayLater.guid,
+      second.guid,
+    ]);
+  });
+
+  it("creates a vendor, a bill with lines, and posts it as a real transaction", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const vendorGuid = guidFrom("1".repeat(32));
+
+    const vendor = doc.createVendor(
+      {
+        name: "Acme Supplies",
+        vendorNumber: "V-0001",
+        email: "ap@acme.test",
+        currency: USD,
+      },
+      vendorGuid,
+    );
+    expect(vendor.name).toBe("Acme Supplies");
+    expect(doc.vendors()).toHaveLength(1);
+    expect(doc.vendor(vendorGuid)?.vendorNumber).toBe("V-0001");
+
+    doc.updateVendor(vendorGuid, { name: "Acme Supplies Inc" });
+    expect(doc.vendor(vendorGuid)?.name).toBe("Acme Supplies Inc");
+
+    const billGuid = guidFrom("2".repeat(32));
+    const bill = doc.createBill(
+      { vendorGuid, billNumber: "BILL-1001", dateOpened: "2026-03-01", currency: USD },
+      billGuid,
+    );
+    expect(bill.datePosted).toBeNull();
+    expect(doc.bills()).toHaveLength(1);
+    // A bill shares GncInvoice with customer invoices but must never show
+    // up as one, and vice versa.
+    expect(doc.invoices()).toHaveLength(0);
+    expect(() =>
+      doc.createBill(
+        {
+          vendorGuid,
+          billNumber: "BILL-DUPE",
+          dateOpened: "2026-03-01",
+          currency: USD,
+        },
+        billGuid,
+      ),
+    ).toThrow(GncXmlError);
+
+    const lineGuid = guidFrom("3".repeat(32));
+    const entry = doc.addBillEntry(
+      {
+        billGuid,
+        date: "2026-03-01",
+        description: "Office supplies",
+        quantity: money(1n, 1n),
+        unitPrice: money(8000n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      lineGuid,
+    );
+    expect(entry.unitPrice).toEqual(money(8000n, 100n));
+    expect(doc.billEntries(billGuid)).toHaveLength(1);
+    doc.deleteBillEntry(lineGuid);
+    expect(doc.billEntries(billGuid)).toHaveLength(0);
+    doc.addBillEntry(
+      {
+        billGuid,
+        date: "2026-03-01",
+        description: "Office supplies",
+        quantity: money(1n, 1n),
+        unitPrice: money(8000n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      lineGuid,
+    );
+
+    const txGuid = guidFrom("4".repeat(32));
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-03-01 00:00:00 +0000",
+        dateEntered: "2026-03-01 00:00:00 +0000",
+        description: "Bill BILL-1001",
+        splits: [
+          { accountGuid: SALARY, value: money(8000n, 100n) },
+          { accountGuid: BANK, value: money(-8000n, 100n) },
+        ],
+      },
+      {
+        transaction: txGuid,
+        splits: [guidFrom("5".repeat(32)), guidFrom("6".repeat(32))],
+      },
+    );
+    doc.markBillPosted(billGuid, "2026-03-01", txGuid, BANK);
+
+    const posted = doc.bill(billGuid);
+    expect(posted?.datePosted).toBe("2026-03-01");
+    expect(posted?.postedTransactionGuid).toBe(txGuid);
+    expect(posted?.payableAccountGuid).toBe(BANK);
+
+    const reparsed = GncXmlDocument.parse(doc.serialize());
+    expect(reparsed.vendors()).toHaveLength(1);
+    expect(reparsed.bills()).toHaveLength(1);
+    expect(reparsed.billEntries(billGuid)).toHaveLength(1);
+    expect(reparsed.bill(billGuid)?.datePosted).toBe("2026-03-01");
+    expect(reparsed.invoices()).toHaveLength(0);
+
+    doc.deleteVendor(vendorGuid);
+    expect(doc.vendor(vendorGuid)).toBeUndefined();
+  });
+
+  it("refuses to delete a vendor that still has bills, and only clears its own bill's entries", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const vendorGuid = guidFrom("1".repeat(32));
+    doc.createVendor({ name: "Acme", currency: USD }, vendorGuid);
+    const billGuid = guidFrom("2".repeat(32));
+    doc.createBill(
+      { vendorGuid, billNumber: "BILL-1", dateOpened: "2026-03-01", currency: USD },
+      billGuid,
+    );
+    expect(doc.vendorInUse(vendorGuid)).toBe(true);
+
+    const otherBillGuid = guidFrom("3".repeat(32));
+    doc.createBill(
+      { vendorGuid, billNumber: "BILL-2", dateOpened: "2026-03-05", currency: USD },
+      otherBillGuid,
+    );
+    const kept = doc.addBillEntry(
+      {
+        billGuid: otherBillGuid,
+        date: "2026-03-05",
+        description: "Kept",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      guidFrom("4".repeat(32)),
+    );
+    doc.addBillEntry(
+      {
+        billGuid,
+        date: "2026-03-01",
+        description: "Removed",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      guidFrom("5".repeat(32)),
+    );
+
+    doc.deleteBill(billGuid);
+    expect(doc.bill(billGuid)).toBeUndefined();
+    // The vendor's other bill still exists.
+    expect(doc.vendorInUse(vendorGuid)).toBe(true);
+    expect(doc.billEntries(otherBillGuid).map((entry) => entry.guid)).toEqual([
+      kept.guid,
+    ]);
+
+    doc.deleteBill(otherBillGuid);
+    expect(doc.vendorInUse(vendorGuid)).toBe(false);
+  });
+
+  it("no-ops deleting an unknown vendor, bill or bill entry, and rejects unknown ids", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const unknown = guidFrom("f".repeat(32));
+    expect(() => doc.deleteVendor(unknown)).not.toThrow();
+    expect(() => doc.deleteBill(unknown)).not.toThrow();
+    expect(() => doc.deleteBillEntry(unknown)).not.toThrow();
+    expect(() => doc.updateVendor(unknown, { name: "x" })).toThrow(GncXmlError);
+    expect(() => doc.markBillPosted(unknown, "2026-01-01", unknown, unknown)).toThrow(
+      GncXmlError,
+    );
+  });
+
+  it("updates individual vendor fields independently, including on a vendor with no address block", () => {
+    const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:vendor="http://www.gnucash.org/XML/vendor" xmlns:book="http://www.gnucash.org/XML/book" xmlns:cmdty="http://www.gnucash.org/XML/cmdty">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"7".repeat(32)}</book:id>
+<gnc:GncVendor version="2.0.0">
+  <vendor:guid type="guid">${"8".repeat(32)}</vendor:guid>
+  <vendor:name>No Address LLC</vendor:name>
+  <vendor:id>V-0002</vendor:id>
+  <vendor:active>1</vendor:active>
+</gnc:GncVendor>
+</gnc:book>
+</gnc-v2>`);
+    const guid = "8".repeat(32);
+    expect(doc.vendor(guid)?.addressLine1).toBe("");
+
+    doc.updateVendor(guid, { vendorNumber: "V-0003" });
+    expect(doc.vendor(guid)?.vendorNumber).toBe("V-0003");
+    expect(doc.vendor(guid)?.name).toBe("No Address LLC");
+
+    doc.updateVendor(guid, { notes: "Reliable", active: false });
+    expect(doc.vendor(guid)).toMatchObject({ notes: "Reliable", active: false });
+
+    doc.updateVendor(guid, { addressLine1: "500 Market St" });
+    expect(doc.vendor(guid)?.addressLine1).toBe("500 Market St");
+  });
+
+  it("reads a bill missing its owner, and filters out a malformed bill entry", () => {
+    const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:invoice="http://www.gnucash.org/XML/invoice" xmlns:entry="http://www.gnucash.org/XML/entry" xmlns:book="http://www.gnucash.org/XML/book" xmlns:ts="http://www.gnucash.org/XML/ts">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"9".repeat(32)}</book:id>
+<gnc:GncInvoice version="2.0.0">
+  <invoice:guid type="guid">${"a".repeat(32)}</invoice:guid>
+  <invoice:id>BILL-0</invoice:id>
+  <invoice:owner version="2.0.0"><owner:type>gncVendor</owner:type></invoice:owner>
+  <invoice:opened><ts:date>2026-01-01</ts:date></invoice:opened>
+  <invoice:active>1</invoice:active>
+</gnc:GncInvoice>
+<gnc:GncEntry version="2.0.0">
+  <entry:guid type="guid">${"b".repeat(32)}</entry:guid>
+</gnc:GncEntry>
+</gnc:book>
+</gnc-v2>`);
+    const billGuid = "a".repeat(32);
+    const bill = doc.bill(billGuid);
+    expect(bill?.vendorGuid).toBe("");
+    expect(bill?.datePosted).toBeNull();
+    expect(bill?.postedTransactionGuid).toBeNull();
+    expect(bill?.payableAccountGuid).toBeNull();
+    expect(doc.billEntries(billGuid)).toHaveLength(0);
+    expect(doc.bills()).toHaveLength(1);
+    expect(doc.invoices()).toHaveLength(0);
+  });
+
+  it("sorts bill entries by date, then by guid on the same day", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const vendorGuid = guidFrom("1".repeat(32));
+    doc.createVendor({ name: "Acme", currency: USD }, vendorGuid);
+    const billGuid = guidFrom("2".repeat(32));
+    doc.createBill(
+      { vendorGuid, billNumber: "BILL-1", dateOpened: "2026-03-01", currency: USD },
+      billGuid,
+    );
+    const second = doc.addBillEntry(
+      {
+        billGuid,
+        date: "2026-03-05",
+        description: "Second day",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      guidFrom("9".repeat(32)),
+    );
+    const sameDayLater = doc.addBillEntry(
+      {
+        billGuid,
+        date: "2026-03-01",
+        description: "Same day, higher guid",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      guidFrom("4".repeat(32)),
+    );
+    const sameDayEarlier = doc.addBillEntry(
+      {
+        billGuid,
+        date: "2026-03-01",
+        description: "Same day, lower guid",
+        quantity: money(1n, 1n),
+        unitPrice: money(100n, 100n),
+        expenseAccountGuid: SALARY,
+      },
+      guidFrom("3".repeat(32)),
+    );
+    expect(doc.billEntries(billGuid).map((entry) => entry.guid)).toEqual([
+      sameDayEarlier.guid,
+      sameDayLater.guid,
+      second.guid,
+    ]);
   });
 });
