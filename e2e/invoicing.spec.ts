@@ -143,7 +143,9 @@ test("receipts: capturing a receipt posts an expense and shows the receipt image
   await page.getByLabel("Description").fill("Printer paper");
   await page.getByLabel("Date").fill("2026-03-02");
   await page.getByLabel("Amount").fill("42.00");
-  await page.getByLabel("Expense account").selectOption({ label: "E2E Office Supplies" });
+  await page
+    .getByLabel("Expense account")
+    .selectOption({ label: "E2E Office Supplies" });
   await page.getByLabel("Paid from").selectOption({ label: "E2E Wallet" });
   await page.getByRole("button", { name: "Post expense" }).click();
 
