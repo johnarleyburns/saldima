@@ -297,6 +297,83 @@ describe("Book auth in workerd", () => {
       await (await request(stub, "/app/journal", { headers: { cookie } })).text(),
     ).not.toContain("Should not post");
   });
+
+  it("exports an account's register as QIF and CSV", async () => {
+    const stub = env.BOOK.get(env.BOOK.idFromName("tenant-register-export"));
+    const setup = await request(stub, "/app/setup", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token: "local-setup-token",
+        name: "Export Owner",
+        email: "export@example.test",
+        password: "correct horse battery staple",
+        template: "small-business",
+      }),
+    });
+    const cookie = cookieFrom(setup);
+    const totpPage = await request(stub, "/app/security/totp", { headers: { cookie } });
+    const secret = /data-secret="([A-Z2-7]+)"/.exec(await totpPage.text())?.[1];
+    if (!secret) throw new Error("missing TOTP secret");
+    await request(stub, "/app/security/totp", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code: await totpCode(secret, Date.now()) }),
+    });
+
+    const accountsHtml = await (
+      await request(stub, "/app/accounts", { headers: { cookie } })
+    ).text();
+    const expenseGuid = accountGuidFrom(accountsHtml, "Supplies");
+    const bankGuid = accountGuidFrom(accountsHtml, "Business Checking");
+    expect(expenseGuid).not.toBe("");
+    expect(bankGuid).not.toBe("");
+
+    await request(stub, "/app/journal", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        date: "2026-01-15",
+        description: "Office supplies",
+        "split-account-0": expenseGuid,
+        "split-amount-0": "42.00",
+        "split-account-1": bankGuid,
+        "split-amount-1": "-42.00",
+      }),
+    });
+
+    const qif = await request(stub, `/app/accounts/${bankGuid}/export/qif`, {
+      headers: { cookie },
+    });
+    expect(qif.status).toBe(200);
+    expect(qif.headers.get("content-type")).toBe("text/qif");
+    expect(qif.headers.get("content-disposition")).toContain(
+      'filename="Business-Checking.qif"',
+    );
+    const qifText = await qif.text();
+    expect(qifText).toContain("!Type:Bank");
+    expect(qifText).toContain("D2026-01-15");
+    expect(qifText).toContain("T-42.00");
+    expect(qifText).toContain("POffice supplies");
+    expect(qifText).toContain("LSupplies");
+
+    const csv = await request(stub, `/app/accounts/${bankGuid}/export/csv`, {
+      headers: { cookie },
+    });
+    expect(csv.status).toBe(200);
+    expect(csv.headers.get("content-type")).toBe("text/csv");
+    expect(csv.headers.get("content-disposition")).toContain(
+      'filename="Business-Checking.csv"',
+    );
+    const csvText = await csv.text();
+    expect(csvText).toContain("Date,Description,Memo,Amount,Category,Reference");
+    expect(csvText).toContain("2026-01-15,Office supplies,,-42.00,Supplies,");
+
+    const unknown = await request(stub, `/app/accounts/${"f".repeat(32)}/export/qif`, {
+      headers: { cookie },
+    });
+    expect(unknown.status).toBe(404);
+  });
 });
 
 function accountGuidFrom(html: string, name: string): string {

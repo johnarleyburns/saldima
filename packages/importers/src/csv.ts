@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { addMoney, isZeroMoney, type Money, negateMoney } from "@saldima/gnucash";
+import {
+  addMoney,
+  formatMoney,
+  isZeroMoney,
+  type Money,
+  negateMoney,
+} from "@saldima/gnucash";
 
 import { parseImportAmount } from "./amount.ts";
 import { parseImportDate } from "./date.ts";
@@ -286,4 +292,29 @@ export function parseCsv(text: string, map?: CsvColumnMap): ImportResult {
   if (rows.length === 0)
     throw new ImportFormatError("No usable CSV transactions found.");
   return { source: "csv", rows, warnings };
+}
+
+function escapeCsvCell(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+}
+
+/** Writes a register's rows with headers `detectCsvMap` recognises, the inverse of `parseCsv`. */
+export function serializeCsv(rows: readonly ImportRow[]): string {
+  const header = ["Date", "Description", "Memo", "Amount", "Category", "Reference"];
+  const lines = [header.join(",")];
+  for (const row of rows) {
+    lines.push(
+      [
+        row.date,
+        row.payee,
+        row.memo,
+        formatMoney(row.amount, 100n),
+        row.category,
+        row.reference,
+      ]
+        .map(escapeCsvCell)
+        .join(","),
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
