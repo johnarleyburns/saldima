@@ -110,6 +110,18 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 </main></body></html>`;
 }
 
+function billingPage(title: string, body: string, refreshSeconds?: number): string {
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${
+    refreshSeconds ? `<meta http-equiv="refresh" content="${refreshSeconds}">` : ""
+  }<title>${escapeHtml(title)}</title>
+<style>${designCss}</style></head>
+<body><main class="narrow">
+<a class="brand" href="/">Saldima</a>
+${body}
+</main></body></html>`;
+}
+
 function bookProvisioner(env: AppBindings) {
   return async (tenantId: string, email: string): Promise<{ setupToken: string }> => {
     if (!env.PROVISION_SECRET) throw new Error("provisioning is not configured");
@@ -220,7 +232,14 @@ export function createApp(): Hono<AppEnv> {
 
   app.get("/billing/cancel", (c) =>
     c.html(
-      `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Checkout cancelled</title></head><body><h1>Checkout cancelled</h1><p>No charge was made.</p><p><a href="/signup">Try again</a></p></body></html>`,
+      billingPage(
+        "Checkout cancelled",
+        `<h1>Checkout cancelled</h1>
+<p class="muted">No charge was made.</p>
+<div class="card">
+<a class="button" href="/signup">Try again</a>
+</div>`,
+      ),
       200,
     ),
   );
@@ -229,7 +248,20 @@ export function createApp(): Hono<AppEnv> {
     const sessionId = c.req.query("session_id") ?? "";
     const setupUrl = sessionId ? await c.env.KV.get(`checkout:${sessionId}`) : null;
     return c.html(
-      `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${setupUrl ? "" : '<meta http-equiv="refresh" content="3">'}<title>Payment received</title></head><body><h1>Payment received</h1>${setupUrl ? `<p>Your book is ready. <a href="${escapeHtml(setupUrl)}">Set up your owner account</a>.</p><p class="muted">The same link was emailed to you.</p>` : "<p>We are setting up your book. This page refreshes automatically.</p>"}</body></html>`,
+      billingPage(
+        "Payment received",
+        setupUrl
+          ? `<h1>Payment received</h1>
+<p class="muted">Your book is ready.</p>
+<div class="card">
+<p>Set up your owner account to continue.</p>
+<p class="muted">The same link was emailed to you.</p>
+<a class="button" href="${escapeHtml(setupUrl)}">Set up your owner account</a>
+</div>`
+          : `<h1>Payment received</h1>
+<p class="muted">We are setting up your book. This page refreshes automatically.</p>`,
+        setupUrl ? undefined : 3,
+      ),
       200,
     );
   });

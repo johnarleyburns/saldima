@@ -116,15 +116,18 @@ describe("Book auth in workerd", () => {
       body: new URLSearchParams({ code }),
     });
     expect(enrolled.status).toBe(302);
-    expect(enrolled.headers.get("location")).toBe("/app");
+    expect(enrolled.headers.get("location")).toBe("/app/books");
 
-    const dashboard = await request(stub, "/app", { headers: { cookie } });
-    expect(dashboard.status).toBe(200);
-    const dashboardHtml = await dashboard.text();
-    expect(dashboardHtml).toContain("owner@example.test");
-    expect(dashboardHtml).toContain('href="/app/accounts"');
-    expect(dashboardHtml).toContain('href="/app/settings"');
-    expect(dashboardHtml).toContain("github.com/johnarleyburns/saldima");
+    const appRoot = await request(stub, "/app", { headers: { cookie } });
+    expect(appRoot.status).toBe(302);
+    expect(appRoot.headers.get("location")).toBe("/app/books");
+
+    const books = await request(stub, "/app/books", { headers: { cookie } });
+    expect(books.status).toBe(200);
+    const booksHtml = await books.text();
+    expect(booksHtml).toContain('href="/app/accounts"');
+    expect(booksHtml).toContain('href="/app/settings"');
+    expect(booksHtml).toContain("github.com/johnarleyburns/saldima");
 
     const settings = await request(stub, "/app/settings", { headers: { cookie } });
     expect(settings.status).toBe(200);
@@ -218,6 +221,6 @@ describe("Book auth in workerd", () => {
       body: new URLSearchParams({ code: codeAgain }),
     });
     expect(verified.status).toBe(302);
-    expect(verified.headers.get("location")).toBe("/app");
+    expect(verified.headers.get("location")).toBe("/app/books");
   });
 });

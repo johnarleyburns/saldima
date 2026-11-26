@@ -356,7 +356,7 @@ export class Book {
         runtime: "durable-object",
       }),
     );
-    app.get("/app", (c) => this.dashboard(c));
+    app.get("/app", (c) => c.redirect("/app/books"));
     app.get("/app/login", (c) => this.loginPage(c));
     app.post("/app/login", (c) => this.login(c));
     app.post("/app/logout", (c) => this.logout(c));
@@ -651,7 +651,7 @@ ${TEMPLATE_IDS.map((id) => `<option value="${id}">${escapeHtml(templateById(id).
   private async totpPage(c: BookContext, error = ""): Promise<Response> {
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
-    if (session.totp_verified === 1) return c.redirect("/app");
+    if (session.totp_verified === 1) return c.redirect("/app/books");
     if (!this.env.MASTER_KEY) return c.text("Server is not configured for TOTP.", 503);
 
     const credential = this.credential(session.user_id);
@@ -706,7 +706,7 @@ ${setupBlock}
     if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
-    if (session.totp_verified === 1) return c.redirect("/app");
+    if (session.totp_verified === 1) return c.redirect("/app/books");
     if (!this.env.MASTER_KEY) return c.text("Server is not configured for TOTP.", 503);
 
     const body = await c.req.parseBody();
@@ -743,7 +743,7 @@ ${setupBlock}
       );
     }
     this.finishSession(session.token_hash);
-    return c.redirect("/app");
+    return c.redirect("/app/books");
   }
 
   private bookRows(): BookRow[] {
@@ -1229,7 +1229,12 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <div class="stat green"><div class="label">Net assets</div><div class="value">${formatMoney(totals.netAssets, 100n)}</div></div>
 <div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
 </div>
-<p><a href="/app">Back</a> · <a href="/app/accounts/new">Add account</a> · <a href="/app/journal">Journal</a> · <a href="/app/books">Books</a> · <a href="/app/import">Import</a> · <a href="/app/export/xml">Export</a></p>
+<p>
+<a class="button secondary" href="/app/books">Back</a>
+<a class="button secondary" href="/app/accounts/new">Add account</a>
+<a class="button secondary" href="/app/import">Import</a>
+<a class="button secondary" href="/app/export/xml">Export</a>
+</p>
 ${this.renderAccountTree(this.accountsTree(bookId), 0, rolledUpTotals(rows, balances))}`,
       ),
       200,
@@ -1935,7 +1940,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     return page(
       title,
       `<header class="appbar">
-<a class="brand" href="/app">Saldima</a>
+<a class="brand" href="/app/books">Saldima</a>
 <nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/reports">Reports</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
@@ -2089,35 +2094,6 @@ ${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join
 </form>
 <p>Two-factor authentication is enabled.</p>
 <form method="post" action="/app/logout"><button type="submit">Sign out</button></form>`,
-      ),
-      200,
-    );
-  }
-
-  private async dashboard(c: BookContext): Promise<Response> {
-    const session = await this.currentSession(c);
-    if (!session) return c.redirect("/app/login");
-    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const user = this.userById(session.user_id);
-    if (!user) return c.redirect("/app/login");
-    const balances = this.balanceMap(c.get("bookId"));
-    const rows = this.visibleAccountRows(c.get("bookId"));
-    const totals = bookTotals(rows, balances);
-    return c.html(
-      this.appPage(
-        "Books",
-        `<h1>Your books</h1>
-<p class="muted">${escapeHtml(user.email)} · ${escapeHtml(user.role)} · ${escapeHtml(c.get("tenantId"))} · Company: <strong>${escapeHtml(this.activeBook(c).name)}</strong></p>
-<div class="summary">
-<div class="stat accent"><div class="label">Accounts</div><div class="value">${rows.length}</div></div>
-<div class="stat green"><div class="label">Net assets</div><div class="value">${formatMoney(totals.netAssets, 100n)}</div></div>
-<div class="stat blue"><div class="label">Profit</div><div class="value">${formatMoney(totals.profit, 100n)}</div></div>
-</div>
-<div class="grid">
-<a class="card" href="/app/accounts" style="text-decoration:none;color:inherit"><h2 style="margin-top:0">Chart of accounts</h2><p class="muted">Browse, add and edit accounts. Branches fold like the desktop tree.</p></a>
-<div class="card"><h2 style="margin-top:0">Compatible with GnuCash</h2><p class="muted">SQLite and XML books, exact split values, half-up posting.</p></div>
-</div>
-<form method="post" action="/app/logout"><button type="submit" class="secondary">Sign out</button></form>`,
       ),
       200,
     );
