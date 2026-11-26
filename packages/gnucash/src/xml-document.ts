@@ -61,7 +61,10 @@ export interface XmlSplit {
   readonly accountGuid: string;
   readonly memo: string;
   readonly action: string;
+  /** `"n"` not reconciled, `"c"` cleared, `"y"` reconciled -- GnuCash's own codes. */
   readonly reconcileState: string;
+  /** Set only once `reconcileState` is `"y"`; `YYYY-MM-DD HH:MM:SS +ZZZZ`. */
+  readonly reconcileDate: string | null;
   readonly value: Money;
   readonly quantity: Money;
 }
@@ -451,17 +454,21 @@ export class GncXmlDocument {
   private readTransaction(transactionNode: XmlNode): XmlTransaction {
     const splitsContainer = first(transactionNode, "splits");
     const splits = children(splitsContainer ?? transactionNode, "split").map(
-      (splitNode): XmlSplit => ({
-        guid: decoded(first(splitNode, "id")),
-        accountGuid: decoded(first(splitNode, "account")),
-        memo: decoded(first(splitNode, "memo")),
-        action: decoded(first(splitNode, "action")),
-        reconcileState: decoded(first(splitNode, "reconciled-state")) || "n",
-        value: rational(text(first(splitNode, "value"))),
-        quantity: rational(
-          text(first(splitNode, "quantity")) || text(first(splitNode, "value")),
-        ),
-      }),
+      (splitNode): XmlSplit => {
+        const reconcileDateNode = nested(splitNode, "reconcile-date", "date");
+        return {
+          guid: decoded(first(splitNode, "id")),
+          accountGuid: decoded(first(splitNode, "account")),
+          memo: decoded(first(splitNode, "memo")),
+          action: decoded(first(splitNode, "action")),
+          reconcileState: decoded(first(splitNode, "reconciled-state")) || "n",
+          reconcileDate: reconcileDateNode ? decoded(reconcileDateNode) : null,
+          value: rational(text(first(splitNode, "value"))),
+          quantity: rational(
+            text(first(splitNode, "quantity")) || text(first(splitNode, "value")),
+          ),
+        };
+      },
     );
     return {
       guid: decoded(first(transactionNode, "id")),
@@ -534,6 +541,45 @@ export class GncXmlDocument {
     if (!transactionNode) return;
     removeChild(this.book, transactionNode);
     this.transactionNodes.delete(guid);
+  }
+
+  /**
+   * Sets one split's reconcile state, the same action as checking a row off
+   * in GnuCash's Reconcile window. `reconcileDate` is required for `"y"`
+   * (reconciled) and cleared for any other state, matching desktop GnuCash.
+   */
+  setSplitReconcileState(
+    transactionGuid: string,
+    splitGuid: string,
+    state: "n" | "c" | "y",
+    reconcileDate?: string,
+  ): void {
+    const transactionNode = this.transactionNodes.get(transactionGuid);
+    if (!transactionNode)
+      throw new GncXmlError(`unknown transaction ${transactionGuid}`);
+    const splitsContainer = first(transactionNode, "splits") ?? transactionNode;
+    const splitNode = children(splitsContainer, "split").find(
+      (node) => decoded(first(node, "id")) === splitGuid,
+    );
+    if (!splitNode) throw new GncXmlError(`unknown split ${splitGuid}`);
+    setLeafText(splitNode, "split:reconciled-state", state);
+    const existingDate = first(splitNode, "reconcile-date");
+    if (state === "y") {
+      if (!reconcileDate) {
+        throw new GncXmlError(
+          "a reconcile date is required to mark a split reconciled",
+        );
+      }
+      if (existingDate) {
+        setLeafText(existingDate, "ts:date", reconcileDate);
+      } else {
+        splitNode.children.push(
+          node("split:reconcile-date", {}, [leaf("ts:date", reconcileDate)]),
+        );
+      }
+    } else if (existingDate) {
+      removeChild(splitNode, existingDate);
+    }
   }
 
   /**

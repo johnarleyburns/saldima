@@ -141,6 +141,77 @@ describe("GncXmlDocument", () => {
     expect(doc.transaction(txId)).toBeUndefined();
   });
 
+  it("reconciles a split, then un-reconciles it, like checking a row off in GnuCash's Reconcile window", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-02-01 00:00:00 +0000",
+        dateEntered: "2026-02-01 00:00:00 +0000",
+        description: "Coffee",
+        splits: [
+          { accountGuid: BANK, value: money(-500n, 100n) },
+          { accountGuid: SALARY, value: money(500n, 100n) },
+        ],
+      },
+      { transaction: txId, splits: splitIds },
+    );
+    const [bankSplitId] = splitIds;
+    if (!bankSplitId) throw new Error("expected a split id");
+
+    doc.setSplitReconcileState(txId, bankSplitId, "c");
+    expect(doc.transaction(txId)?.splits[0]?.reconcileState).toBe("c");
+    expect(doc.transaction(txId)?.splits[0]?.reconcileDate).toBeNull();
+
+    doc.setSplitReconcileState(txId, bankSplitId, "y", "2026-02-05 00:00:00 +0000");
+    const reconciled = doc.transaction(txId)?.splits[0];
+    expect(reconciled?.reconcileState).toBe("y");
+    expect(reconciled?.reconcileDate).toBe("2026-02-05 00:00:00 +0000");
+
+    const reparsed = GncXmlDocument.parse(doc.serialize());
+    const reparsedSplit = reparsed.transaction(txId)?.splits[0];
+    expect(reparsedSplit?.reconcileState).toBe("y");
+    expect(reparsedSplit?.reconcileDate).toBe("2026-02-05 00:00:00 +0000");
+
+    doc.setSplitReconcileState(txId, bankSplitId, "n");
+    const cleared = doc.transaction(txId)?.splits[0];
+    expect(cleared?.reconcileState).toBe("n");
+    expect(cleared?.reconcileDate).toBeNull();
+  });
+
+  it("requires a reconcile date to mark a split reconciled, and rejects unknown ids", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-02-01 00:00:00 +0000",
+        dateEntered: "2026-02-01 00:00:00 +0000",
+        description: "Coffee",
+        splits: [
+          { accountGuid: BANK, value: money(-500n, 100n) },
+          { accountGuid: SALARY, value: money(500n, 100n) },
+        ],
+      },
+      { transaction: txId, splits: splitIds },
+    );
+    const [bankSplitId] = splitIds;
+    if (!bankSplitId) throw new Error("expected a split id");
+
+    expect(() => doc.setSplitReconcileState(txId, bankSplitId, "y")).toThrow(
+      GncXmlError,
+    );
+    expect(() =>
+      doc.setSplitReconcileState(guidFrom("f".repeat(32)), bankSplitId, "c"),
+    ).toThrow(GncXmlError);
+    expect(() =>
+      doc.setSplitReconcileState(txId, guidFrom("f".repeat(32)), "c"),
+    ).toThrow(GncXmlError);
+  });
+
   it("rejects an unbalanced or under-specified transaction", async () => {
     const doc = GncXmlDocument.parse(await loadFixtureXml());
     expect(() =>

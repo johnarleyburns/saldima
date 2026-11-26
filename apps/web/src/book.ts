@@ -11,6 +11,7 @@ import {
   parseMoneyHalfUp,
   readBookSnapshot,
   type XmlAccount,
+  type XmlSplit,
 } from "@saldima/gnucash";
 import {
   categoryKey,
@@ -342,6 +343,10 @@ export class Book {
     );
     app.post("/app/accounts/:guid", (c) => this.updateAccount(c));
     app.post("/app/accounts/:guid/delete", (c) => this.deleteAccount(c));
+    app.get("/app/accounts/:guid/reconcile", (c) =>
+      this.reconcilePage(c, c.req.param("guid") ?? ""),
+    );
+    app.post("/app/accounts/:guid/reconcile", (c) => this.reconcileUpdate(c));
     app.get("/app/export/xml", (c) => this.exportXml(c));
     app.get("/app/import", (c) => this.importPage(c));
     app.post("/app/import", (c) => this.importBook(c));
@@ -1126,6 +1131,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <form method="post" action="/app/accounts/${escapeHtml(guid)}/delete">
 <button type="submit" class="danger">Delete account</button>
 </form>
+<p><a class="button secondary" href="/app/accounts/${escapeHtml(guid)}/reconcile">Reconcile</a></p>
 <p><a href="/app/accounts">Cancel</a></p>`,
       ),
       200,
@@ -1199,6 +1205,149 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     document.deleteAccount(guid);
     await this.store.save(bookId, document, nowIso());
     return c.redirect("/app/accounts");
+  }
+
+  /** Splits for `guid` not yet reconciled, oldest first -- what Reconcile shows. */
+  private async unreconciledSplits(
+    bookId: string,
+    guid: string,
+  ): Promise<
+    Array<{
+      transactionGuid: string;
+      date: string;
+      description: string;
+      split: XmlSplit;
+    }>
+  > {
+    const document = await this.store.get(bookId);
+    if (!document) return [];
+    return document
+      .transactions()
+      .flatMap((transaction) =>
+        transaction.splits
+          .filter((split) => split.accountGuid === guid && split.reconcileState !== "y")
+          .map((split) => ({
+            transactionGuid: transaction.guid,
+            date: transaction.datePosted,
+            description: transaction.description,
+            split,
+          })),
+      )
+      .sort((left, right) => left.date.localeCompare(right.date));
+  }
+
+  /**
+   * GnuCash's Reconcile window: check off every transaction that appears on
+   * a bank/card statement, see the cleared total update, and finish once it
+   * matches the statement's ending balance. This is a manual, offline
+   * workflow -- no bank feed or auto-matching, which stays out of scope.
+   */
+  private async reconcilePage(
+    c: BookContext,
+    guid: string,
+    notice = "",
+  ): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const account = await this.accountByGuid(guid, bookId);
+    if (!account) return c.text("Account not found", 404);
+    const rows = await this.unreconciledSplits(bookId, guid);
+    const clearedTotal = rows
+      .filter((row) => row.split.reconcileState === "c")
+      .reduce((sum, row) => addMoney(sum, row.split.value), money(0n));
+    const itemRows = rows
+      .map(
+        (row) =>
+          `<li><label><input type="checkbox" name="cleared_${escapeHtml(row.split.guid)}"${row.split.reconcileState === "c" ? " checked" : ""}> ${escapeHtml(row.date.slice(0, 10))} &middot; ${escapeHtml(row.description)}</label><span class="amount">${formatMoney(row.split.value, 100n)}</span></li>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        `Reconcile ${account.name}`,
+        `<h1>Reconcile ${escapeHtml(account.name)}</h1>
+<p class="muted">Check off every transaction that appears on your statement. The cleared total must match the statement's ending balance before you can finish.</p>
+${notice ? `<p class="error">${escapeHtml(notice)}</p>` : ""}
+<form method="post" action="/app/accounts/${escapeHtml(guid)}/reconcile">
+<label for="statement-date">Statement date</label>
+<input id="statement-date" name="statement_date" type="date" value="${nowIso().slice(0, 10)}">
+<label for="statement-balance">Statement ending balance</label>
+<input id="statement-balance" name="statement_balance" inputmode="decimal" placeholder="1234.56">
+<p class="muted">Cleared total so far: <strong>${formatMoney(clearedTotal, 100n)}</strong></p>
+<ul class="journal">${itemRows || `<li><span class="muted">Nothing left to reconcile.</span></li>`}</ul>
+<button type="submit" name="action" value="update">Update</button>
+<button type="submit" name="action" value="finish">Finish reconciling</button>
+</form>
+<p><a href="/app/accounts/${escapeHtml(guid)}/edit">Back to account</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async reconcileUpdate(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const bookId = c.get("bookId");
+    const account = await this.accountByGuid(guid, bookId);
+    if (!account) return c.text("Account not found", 404);
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    const body = await c.req.parseBody();
+    const action = formValue(body, "action");
+    const statementDate = formValue(body, "statement_date");
+
+    const rows = await this.unreconciledSplits(bookId, guid);
+    let clearedTotal = money(0n);
+    for (const row of rows) {
+      const checked = body[`cleared_${row.split.guid}`] === "on";
+      if (checked) clearedTotal = addMoney(clearedTotal, row.split.value);
+      const newState = checked ? "c" : "n";
+      if (newState !== row.split.reconcileState) {
+        document.setSplitReconcileState(row.transactionGuid, row.split.guid, newState);
+      }
+    }
+
+    if (action === "finish") {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(statementDate)) {
+        await this.store.save(bookId, document, nowIso());
+        return this.reconcilePage(c, guid, "Enter a valid statement date to finish.");
+      }
+      let statementBalance: Money;
+      try {
+        statementBalance = parseMoneyHalfUp(formValue(body, "statement_balance"), 100n);
+      } catch {
+        await this.store.save(bookId, document, nowIso());
+        return this.reconcilePage(c, guid, "Enter amounts like 1234.56 or -1234.56.");
+      }
+      if (!equalsMoney(clearedTotal, statementBalance)) {
+        await this.store.save(bookId, document, nowIso());
+        return this.reconcilePage(
+          c,
+          guid,
+          `Not balanced yet: cleared total is ${formatMoney(clearedTotal, 100n)}, statement balance is ${formatMoney(statementBalance, 100n)}. Check off transactions until they match.`,
+        );
+      }
+      const reconcileTimestamp = `${statementDate} 00:00:00 +0000`;
+      for (const row of rows) {
+        if (body[`cleared_${row.split.guid}`] === "on") {
+          document.setSplitReconcileState(
+            row.transactionGuid,
+            row.split.guid,
+            "y",
+            reconcileTimestamp,
+          );
+        }
+      }
+      await this.store.save(bookId, document, nowIso());
+      return c.redirect("/app/accounts");
+    }
+
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect(`/app/accounts/${guid}/reconcile`);
   }
 
   private async accountsPage(c: BookContext): Promise<Response> {
