@@ -7,10 +7,13 @@ import {
   isZeroMoney,
   type Money,
   money,
+  multiplyMoney,
+  negateMoney,
   newGuid,
   parseMoneyHalfUp,
   readBookSnapshot,
   type XmlAccount,
+  type XmlCustomer,
   type XmlSplit,
 } from "@saldima/gnucash";
 import {
@@ -68,6 +71,7 @@ import {
 import { designCss } from "./design.ts";
 import type { R2BucketLike } from "./ports/cloudflare-r2.ts";
 import { totpQrSvg } from "./qr.ts";
+import { ReceiptStore } from "./receipt-store.ts";
 import { balanceSheet, incomeStatement, trialBalance } from "./reports.ts";
 import {
   ACCOUNT_TYPES,
@@ -205,6 +209,7 @@ function formValue(body: Record<string, unknown>, key: string): string {
 export class Book {
   private readonly app: BookApp;
   private readonly store: BookXmlStore;
+  private readonly receipts: ReceiptStore;
 
   constructor(
     private readonly state: DurableObjectStateLike,
@@ -212,6 +217,11 @@ export class Book {
   ) {
     this.migrate();
     this.store = new BookXmlStore(
+      this.env.R2,
+      this.state.id.toString(),
+      this.env.MASTER_KEY ?? "",
+    );
+    this.receipts = new ReceiptStore(
       this.env.R2,
       this.state.id.toString(),
       this.env.MASTER_KEY ?? "",
@@ -347,6 +357,30 @@ export class Book {
       this.reconcilePage(c, c.req.param("guid") ?? ""),
     );
     app.post("/app/accounts/:guid/reconcile", (c) => this.reconcileUpdate(c));
+    app.get("/app/customers", (c) => this.customersPage(c));
+    app.get("/app/customers/new", (c) => this.newCustomerPage(c));
+    app.post("/app/customers", (c) => this.createCustomer(c));
+    app.get("/app/customers/:guid/edit", (c) =>
+      this.editCustomerPage(c, c.req.param("guid") ?? ""),
+    );
+    app.post("/app/customers/:guid", (c) => this.updateCustomer(c));
+    app.post("/app/customers/:guid/delete", (c) => this.deleteCustomer(c));
+    app.get("/app/invoices", (c) => this.invoicesPage(c));
+    app.get("/app/invoices/new", (c) => this.newInvoicePage(c));
+    app.post("/app/invoices", (c) => this.createInvoice(c));
+    app.get("/app/invoices/:guid", (c) =>
+      this.invoiceDetailPage(c, c.req.param("guid") ?? ""),
+    );
+    app.post("/app/invoices/:guid/lines", (c) => this.addInvoiceLine(c));
+    app.post("/app/invoices/:guid/lines/:lineGuid/delete", (c) =>
+      this.deleteInvoiceLine(c),
+    );
+    app.post("/app/invoices/:guid/post", (c) => this.postInvoice(c));
+    app.post("/app/invoices/:guid/delete", (c) => this.deleteInvoiceDraft(c));
+    app.get("/app/receipts", (c) => this.receiptsPage(c));
+    app.get("/app/receipts/new", (c) => this.newReceiptPage(c));
+    app.post("/app/receipts", (c) => this.createReceiptExpense(c));
+    app.get("/app/receipts/image/:txGuid", (c) => this.receiptImage(c));
     app.get("/app/export/xml", (c) => this.exportXml(c));
     app.get("/app/import", (c) => this.importPage(c));
     app.post("/app/import", (c) => this.importBook(c));
@@ -2059,7 +2093,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       title,
       `<header class="appbar">
 <a class="brand" href="/app/books">Saldima</a>
-<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/reports">Reports</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/invoices">Invoices</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
@@ -2268,6 +2302,701 @@ ${notice ? `<p class="muted">${escapeHtml(notice)}</p>` : ""}
     const restored = await this.store.restore(bookId, id, nowIso());
     if (!restored) return c.text("That version no longer exists", 404);
     return c.redirect("/app/settings/versions");
+  }
+
+  // MARK: - Clients (GncCustomer)
+
+  private async customersPage(c: BookContext, notice = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const customers = (document?.customers() ?? []).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+    const rows = customers
+      .map(
+        (customer) =>
+          `<li class="card" style="margin-bottom:0.5rem"><a href="/app/customers/${escapeHtml(customer.guid)}/edit"><strong>${escapeHtml(customer.name)}</strong></a>${customer.email ? `<p class="muted">${escapeHtml(customer.email)}</p>` : ""}</li>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "Clients",
+        `<h1>Clients</h1>
+${notice ? `<p class="muted">${escapeHtml(notice)}</p>` : ""}
+<p><a class="button secondary" href="/app/customers/new">Add client</a></p>
+<ul style="list-style:none;padding:0">${rows || `<p class="muted">No clients yet.</p>`}</ul>`,
+      ),
+      200,
+    );
+  }
+
+  private async newCustomerPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    return c.html(
+      this.appPage(
+        "Add client",
+        `<h1>Add client</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/customers">
+${this.customerFormFields()}
+<button type="submit">Add client</button>
+</form>
+<p><a href="/app/customers">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private customerFormFields(customer?: XmlCustomer): string {
+    return `<label for="name">Name</label>
+<input id="name" name="name" type="text" required maxlength="200" value="${escapeHtml(customer?.name ?? "")}">
+<label for="customer_number">Client number</label>
+<input id="customer_number" name="customer_number" type="text" maxlength="40" value="${escapeHtml(customer?.customerNumber ?? "")}">
+<label for="address_line1">Address</label>
+<input id="address_line1" name="address_line1" type="text" value="${escapeHtml(customer?.addressLine1 ?? "")}">
+<label for="phone">Phone</label>
+<input id="phone" name="phone" type="tel" value="${escapeHtml(customer?.phone ?? "")}">
+<label for="email">Email</label>
+<input id="email" name="email" type="email" value="${escapeHtml(customer?.email ?? "")}">
+<label for="notes">Notes</label>
+<textarea id="notes" name="notes" rows="3">${escapeHtml(customer?.notes ?? "")}</textarea>`;
+  }
+
+  private async createCustomer(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    if (!name || name.length > 200) {
+      return this.newCustomerPage(c, "Enter a name.");
+    }
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    document.createCustomer(
+      {
+        name,
+        customerNumber: formValue(body, "customer_number"),
+        addressLine1: formValue(body, "address_line1"),
+        phone: formValue(body, "phone"),
+        email: formValue(body, "email"),
+        notes: formValue(body, "notes"),
+        currency: { space: "CURRENCY", id: currency },
+      },
+      newGuid(),
+    );
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/customers");
+  }
+
+  private async editCustomerPage(
+    c: BookContext,
+    guid: string,
+    error = "",
+  ): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const customer = document?.customer(guid);
+    if (!customer) return c.text("Client not found", 404);
+    return c.html(
+      this.appPage(
+        "Edit client",
+        `<h1>Edit client</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/customers/${escapeHtml(guid)}">
+${this.customerFormFields(customer)}
+<button type="submit">Save client</button>
+</form>
+<form method="post" action="/app/customers/${escapeHtml(guid)}/delete">
+<button type="submit" class="danger">Delete client</button>
+</form>
+<p><a href="/app/customers">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async updateCustomer(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (!document?.customer(guid)) return c.text("Client not found", 404);
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    if (!name || name.length > 200) {
+      return this.editCustomerPage(c, guid, "Enter a name.");
+    }
+    document.updateCustomer(guid, {
+      name,
+      customerNumber: formValue(body, "customer_number"),
+      addressLine1: formValue(body, "address_line1"),
+      phone: formValue(body, "phone"),
+      email: formValue(body, "email"),
+      notes: formValue(body, "notes"),
+    });
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/customers");
+  }
+
+  private async deleteCustomer(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (!document?.customer(guid)) return c.text("Client not found", 404);
+    if (document.customerInUse(guid)) {
+      return this.editCustomerPage(
+        c,
+        guid,
+        "This client has invoices and cannot be deleted.",
+      );
+    }
+    document.deleteCustomer(guid);
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/customers");
+  }
+
+  // MARK: - Invoices (GncInvoice / GncEntry)
+
+  private incomeAccountRows(
+    document: { accounts(): XmlAccount[] } | null,
+  ): XmlAccount[] {
+    return (document?.accounts() ?? []).filter(
+      (account) => account.type === "INCOME" && !account.placeholder,
+    );
+  }
+
+  private receivableAccountRows(
+    document: { accounts(): XmlAccount[] } | null,
+  ): XmlAccount[] {
+    const types = new Set(["ASSET", "BANK", "CASH", "RECEIVABLE"]);
+    return (document?.accounts() ?? []).filter(
+      (account) => types.has(account.type) && !account.placeholder,
+    );
+  }
+
+  private async invoicesPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const invoices = (document?.invoices() ?? []).sort((a, b) =>
+      b.dateOpened.localeCompare(a.dateOpened),
+    );
+    const customers = new Map(
+      (document?.customers() ?? []).map((customer) => [customer.guid, customer.name]),
+    );
+    const rows = invoices
+      .map((invoice) => {
+        const entries = document?.invoiceEntries(invoice.guid) ?? [];
+        const total = entries.reduce(
+          (sum, entry) => addMoney(sum, multiplyMoney(entry.quantity, entry.unitPrice)),
+          money(0n),
+        );
+        return `<li class="card" style="margin-bottom:0.5rem">
+<a href="/app/invoices/${escapeHtml(invoice.guid)}"><strong>${escapeHtml(invoice.invoiceNumber || "Invoice")}</strong></a>
+<span class="chip">${invoice.datePosted ? "Posted" : "Draft"}</span>
+<p class="muted">${escapeHtml(customers.get(invoice.customerGuid) ?? "Unknown client")} &middot; ${formatMoney(total, 100n)}</p>
+</li>`;
+      })
+      .join("");
+    return c.html(
+      this.appPage(
+        "Invoices",
+        `<h1>Invoices</h1>
+<p>
+<a class="button secondary" href="/app/invoices/new">New invoice</a>
+<a class="button secondary" href="/app/customers">Clients</a>
+</p>
+<ul style="list-style:none;padding:0">${rows || `<p class="muted">No invoices yet.</p>`}</ul>`,
+      ),
+      200,
+    );
+  }
+
+  private async newInvoicePage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const customers = (document?.customers() ?? []).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+    if (customers.length === 0) {
+      return c.html(
+        this.appPage(
+          "New invoice",
+          `<h1>New invoice</h1>
+<p class="error">Add a client before creating an invoice.</p>
+<p><a href="/app/customers/new">Add client</a></p>`,
+        ),
+        200,
+      );
+    }
+    const options = customers
+      .map(
+        (customer) =>
+          `<option value="${escapeHtml(customer.guid)}">${escapeHtml(customer.name)}</option>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "New invoice",
+        `<h1>New invoice</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/invoices">
+<label for="customer">Client</label>
+<select id="customer" name="customer">${options}</select>
+<label for="invoice_number">Invoice number</label>
+<input id="invoice_number" name="invoice_number" type="text" required maxlength="40">
+<label for="date_opened">Date opened</label>
+<input id="date_opened" name="date_opened" type="date" required value="${nowIso().slice(0, 10)}">
+<button type="submit">Create</button>
+</form>
+<p><a href="/app/invoices">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async createInvoice(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const customerGuid = formValue(body, "customer");
+    const invoiceNumber = formValue(body, "invoice_number");
+    const dateOpened = formValue(body, "date_opened");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOpened)) {
+      return this.newInvoicePage(c, "Enter a valid date.");
+    }
+    if (!invoiceNumber) {
+      return this.newInvoicePage(c, "Enter an invoice number.");
+    }
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (!document?.customer(customerGuid)) {
+      return this.newInvoicePage(c, "Choose a valid client.");
+    }
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    const invoice = document.createInvoice(
+      {
+        customerGuid,
+        invoiceNumber,
+        dateOpened,
+        currency: { space: "CURRENCY", id: currency },
+      },
+      newGuid(),
+    );
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect(`/app/invoices/${invoice.guid}`);
+  }
+
+  private async invoiceDetailPage(
+    c: BookContext,
+    guid: string,
+    notice = "",
+  ): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const invoice = document?.invoice(guid);
+    if (!invoice || !document) return c.text("Invoice not found", 404);
+    const customer = document.customer(invoice.customerGuid);
+    const entries = document.invoiceEntries(guid);
+    const total = entries.reduce(
+      (sum, entry) => addMoney(sum, multiplyMoney(entry.quantity, entry.unitPrice)),
+      money(0n),
+    );
+    const accounts = new Map(
+      document.accounts().map((account) => [account.guid, account.name]),
+    );
+    const lineRows = entries
+      .map((entry) => {
+        const amount = multiplyMoney(entry.quantity, entry.unitPrice);
+        const deleteForm = invoice.datePosted
+          ? ""
+          : `<form method="post" action="/app/invoices/${escapeHtml(guid)}/lines/${escapeHtml(entry.guid)}/delete"><button type="submit" class="secondary">Remove</button></form>`;
+        return `<li><span>${escapeHtml(entry.description)} <span class="muted">(${accounts.get(entry.incomeAccountGuid) ?? "?"})</span></span><span class="amount">${formatMoney(amount, 100n)}</span>${deleteForm}</li>`;
+      })
+      .join("");
+    const incomeOptions = this.incomeAccountRows(document)
+      .map(
+        (account) =>
+          `<option value="${escapeHtml(account.guid)}">${escapeHtml(account.name)}</option>`,
+      )
+      .join("");
+    const receivableOptions = this.receivableAccountRows(document)
+      .map(
+        (account) =>
+          `<option value="${escapeHtml(account.guid)}">${escapeHtml(account.name)}</option>`,
+      )
+      .join("");
+    const actions = invoice.datePosted
+      ? `<p class="muted">Posted ${escapeHtml(invoice.datePosted.slice(0, 10))}.</p>`
+      : `<div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Add a line</h2>
+<form method="post" action="/app/invoices/${escapeHtml(guid)}/lines">
+<label for="description">Description</label>
+<input id="description" name="description" type="text" required>
+<label for="line_date">Date</label>
+<input id="line_date" name="line_date" type="date" required value="${nowIso().slice(0, 10)}">
+<label for="quantity">Quantity</label>
+<input id="quantity" name="quantity" value="1" required>
+<label for="unit_price">Unit price</label>
+<input id="unit_price" name="unit_price" placeholder="250.00" required>
+<label for="income_account">Income account</label>
+<select id="income_account" name="income_account">${incomeOptions}</select>
+<button type="submit">Add line</button>
+</form>
+</div>
+<div class="card" style="margin-top:1rem"><h2 style="margin-top:0">Post invoice</h2>
+<p class="muted">Posting debits the account below for ${formatMoney(total, 100n)} and credits each line's income account. This cannot be undone.</p>
+<form method="post" action="/app/invoices/${escapeHtml(guid)}/post">
+<label for="receivable_account">Deposit to</label>
+<select id="receivable_account" name="receivable_account">${receivableOptions}</select>
+<label for="posted_date">Posted date</label>
+<input id="posted_date" name="posted_date" type="date" required value="${nowIso().slice(0, 10)}">
+<button type="submit" ${entries.length === 0 ? "disabled" : ""}>Post invoice</button>
+</form>
+</div>
+<form method="post" action="/app/invoices/${escapeHtml(guid)}/delete" style="margin-top:1rem">
+<button type="submit" class="danger">Delete draft</button>
+</form>`;
+    return c.html(
+      this.appPage(
+        invoice.invoiceNumber || "Invoice",
+        `<h1>${escapeHtml(invoice.invoiceNumber || "Invoice")}</h1>
+${notice ? `<p class="error">${escapeHtml(notice)}</p>` : ""}
+<p class="muted">Client: <strong>${escapeHtml(customer?.name ?? "Unknown")}</strong> &middot; Opened ${escapeHtml(invoice.dateOpened.slice(0, 10))}</p>
+<ul class="journal">${lineRows || `<li><span class="muted">No lines yet.</span></li>`}</ul>
+<p><strong>Total: ${formatMoney(total, 100n)}</strong></p>
+${actions}
+<p><a href="/app/invoices">Back to invoices</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async addInvoiceLine(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const invoice = document?.invoice(guid);
+    if (!invoice || !document) return c.text("Invoice not found", 404);
+    if (invoice.datePosted)
+      return this.invoiceDetailPage(c, guid, "A posted invoice cannot be edited.");
+    const body = await c.req.parseBody();
+    const description = formValue(body, "description");
+    const lineDate = formValue(body, "line_date");
+    const incomeAccount = formValue(body, "income_account");
+    if (
+      !description ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(lineDate) ||
+      !document.account(incomeAccount)
+    ) {
+      return this.invoiceDetailPage(
+        c,
+        guid,
+        "Fill in every field with a valid income account.",
+      );
+    }
+    let quantity: Money;
+    let unitPrice: Money;
+    try {
+      quantity = parseMoneyHalfUp(formValue(body, "quantity"), 10000n);
+      unitPrice = parseMoneyHalfUp(formValue(body, "unit_price"), 100n);
+    } catch {
+      return this.invoiceDetailPage(c, guid, "Enter a valid quantity and unit price.");
+    }
+    if (isZeroMoney(quantity) || isZeroMoney(unitPrice)) {
+      return this.invoiceDetailPage(
+        c,
+        guid,
+        "Quantity and unit price must not be zero.",
+      );
+    }
+    document.addInvoiceEntry(
+      {
+        invoiceGuid: guid,
+        date: lineDate,
+        description,
+        quantity,
+        unitPrice,
+        incomeAccountGuid: incomeAccount,
+      },
+      newGuid(),
+    );
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect(`/app/invoices/${guid}`);
+  }
+
+  private async deleteInvoiceLine(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const lineGuid = c.req.param("lineGuid") ?? "";
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const invoice = document?.invoice(guid);
+    if (!invoice || !document) return c.text("Invoice not found", 404);
+    if (invoice.datePosted)
+      return this.invoiceDetailPage(c, guid, "A posted invoice cannot be edited.");
+    document.deleteInvoiceEntry(lineGuid);
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect(`/app/invoices/${guid}`);
+  }
+
+  private async deleteInvoiceDraft(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const invoice = document?.invoice(guid);
+    if (!invoice || !document) return c.text("Invoice not found", 404);
+    if (invoice.datePosted)
+      return this.invoiceDetailPage(c, guid, "A posted invoice cannot be deleted.");
+    document.deleteInvoice(guid);
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/invoices");
+  }
+
+  /**
+   * Posts a draft invoice: debits the chosen receivable account for the
+   * total and credits each line's income account -- the same effect as
+   * desktop GnuCash's own "Post Invoice". One-way: a posted invoice is
+   * permanent ledger history and can no longer be edited or deleted.
+   */
+  private async postInvoice(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const guid = c.req.param("guid") ?? "";
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const invoice = document?.invoice(guid);
+    if (!invoice || !document) return c.text("Invoice not found", 404);
+    if (invoice.datePosted)
+      return this.invoiceDetailPage(c, guid, "This invoice is already posted.");
+    const body = await c.req.parseBody();
+    const receivableAccount = formValue(body, "receivable_account");
+    const postedDate = formValue(body, "posted_date");
+    if (!document.account(receivableAccount)) {
+      return this.invoiceDetailPage(c, guid, "Choose a valid account.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(postedDate)) {
+      return this.invoiceDetailPage(c, guid, "Enter a valid posted date.");
+    }
+    const entries = document.invoiceEntries(guid);
+    if (entries.length === 0) {
+      return this.invoiceDetailPage(c, guid, "Add at least one line before posting.");
+    }
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    let total = money(0n);
+    const splits = entries.map((entry) => {
+      const amount = multiplyMoney(entry.quantity, entry.unitPrice);
+      total = addMoney(total, amount);
+      return { accountGuid: entry.incomeAccountGuid, value: negateMoney(amount) };
+    });
+    splits.push({ accountGuid: receivableAccount, value: total });
+    const txGuid = newGuid();
+    document.postTransaction(
+      {
+        currency: { space: "CURRENCY", id: currency },
+        datePosted: `${postedDate} 00:00:00 +0000`,
+        dateEntered: `${postedDate} 00:00:00 +0000`,
+        description: `Invoice ${invoice.invoiceNumber}`,
+        splits,
+      },
+      { transaction: txGuid, splits: splits.map(() => newGuid()) },
+    );
+    document.markInvoicePosted(guid, postedDate, txGuid, receivableAccount);
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect(`/app/invoices/${guid}`);
+  }
+
+  // MARK: - Receipts (GnuCash "Associate File/Location")
+
+  private async receiptsPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const receiptTransactions = (document?.transactions() ?? []).filter(
+      (tx) => tx.docLink,
+    );
+    const rows = receiptTransactions
+      .map((tx) => {
+        const amount =
+          tx.splits.find((split) => split.value.num > 0n)?.value ?? money(0n);
+        return `<li class="card" style="margin-bottom:0.5rem">
+<img src="/app/receipts/image/${escapeHtml(tx.guid)}" alt="Receipt" style="max-width:60px;max-height:60px;border-radius:8px;vertical-align:middle;margin-right:0.5rem">
+${escapeHtml(tx.description)} &middot; ${escapeHtml(tx.datePosted.slice(0, 10))}
+<span class="amount">${formatMoney(amount, 100n)}</span>
+</li>`;
+      })
+      .join("");
+    return c.html(
+      this.appPage(
+        "Receipts",
+        `<h1>Receipts</h1>
+<p class="muted">Capture a receipt to post the expense it documents.</p>
+<p><a class="button secondary" href="/app/receipts/new">Add receipt</a></p>
+<ul style="list-style:none;padding:0">${rows || `<p class="muted">No receipts yet.</p>`}</ul>`,
+      ),
+      200,
+    );
+  }
+
+  private async newReceiptPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const expenseOptions = (document?.accounts() ?? [])
+      .filter((account) => account.type === "EXPENSE" && !account.placeholder)
+      .map(
+        (account) =>
+          `<option value="${escapeHtml(account.guid)}">${escapeHtml(account.name)}</option>`,
+      )
+      .join("");
+    const paymentTypes = new Set(["ASSET", "BANK", "CASH", "CREDIT", "LIABILITY"]);
+    const paymentOptions = (document?.accounts() ?? [])
+      .filter((account) => paymentTypes.has(account.type) && !account.placeholder)
+      .map(
+        (account) =>
+          `<option value="${escapeHtml(account.guid)}">${escapeHtml(account.name)}</option>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "Add receipt",
+        `<h1>Add receipt</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/receipts" enctype="multipart/form-data">
+<label for="image">Receipt photo</label>
+<input id="image" name="image" type="file" accept="image/*" required>
+<label for="description">Description</label>
+<input id="description" name="description" type="text" required>
+<label for="date">Date</label>
+<input id="date" name="date" type="date" required value="${nowIso().slice(0, 10)}">
+<label for="amount">Amount</label>
+<input id="amount" name="amount" inputmode="decimal" placeholder="42.00" required>
+<label for="expense_account">Expense account</label>
+<select id="expense_account" name="expense_account">${expenseOptions}</select>
+<label for="payment_account">Paid from</label>
+<select id="payment_account" name="payment_account">${paymentOptions}</select>
+<button type="submit">Post expense</button>
+</form>
+<p><a href="/app/receipts">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async createReceiptExpense(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const file = body.image;
+    if (!(file instanceof File))
+      return this.newReceiptPage(c, "Choose a receipt photo.");
+    const description = formValue(body, "description");
+    const date = formValue(body, "date");
+    const expenseAccount = formValue(body, "expense_account");
+    const paymentAccount = formValue(body, "payment_account");
+    if (!description || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return this.newReceiptPage(c, "Fill in a description and a valid date.");
+    }
+    let amount: Money;
+    try {
+      amount = parseMoneyHalfUp(formValue(body, "amount"), 100n);
+    } catch {
+      return this.newReceiptPage(c, "Enter an amount like 42.00.");
+    }
+    if (isZeroMoney(amount) || amount.num < 0n) {
+      return this.newReceiptPage(c, "Enter a positive amount.");
+    }
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (!document?.account(expenseAccount) || !document.account(paymentAccount)) {
+      return this.newReceiptPage(c, "Choose valid accounts.");
+    }
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    const extension =
+      (file.type.split("/")[1] ?? "jpg").replace(/[^a-z0-9]/gi, "") || "jpg";
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const relativePath = await this.receipts.save(bookId, bytes, extension);
+
+    const txGuid = newGuid();
+    document.postTransaction(
+      {
+        currency: { space: "CURRENCY", id: currency },
+        datePosted: `${date} 00:00:00 +0000`,
+        dateEntered: `${date} 00:00:00 +0000`,
+        description,
+        splits: [
+          { accountGuid: expenseAccount, value: amount },
+          { accountGuid: paymentAccount, value: negateMoney(amount) },
+        ],
+      },
+      { transaction: txGuid, splits: [newGuid(), newGuid()] },
+    );
+    document.setTransactionDocLink(txGuid, relativePath);
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/receipts");
+  }
+
+  private async receiptImage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const txGuid = c.req.param("txGuid") ?? "";
+    const document = await this.store.get(bookId);
+    const docLink = document?.transaction(txGuid)?.docLink;
+    if (!docLink) return c.text("Not found", 404);
+    const bytes = await this.receipts.load(bookId, docLink);
+    if (!bytes) return c.text("Not found", 404);
+    const copy = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(copy).set(bytes);
+    return new Response(copy, { headers: { "content-type": "image/jpeg" } });
   }
 
   private async logout(c: BookContext): Promise<Response> {
