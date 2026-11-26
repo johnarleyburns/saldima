@@ -223,4 +223,85 @@ describe("Book auth in workerd", () => {
     expect(verified.status).toBe(302);
     expect(verified.headers.get("location")).toBe("/app/books");
   });
+
+  it("posts a multi-split transaction (expense + input tax + payable)", async () => {
+    const stub = env.BOOK.get(env.BOOK.idFromName("tenant-splits"));
+    const setup = await request(stub, "/app/setup", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token: "local-setup-token",
+        name: "Splits Owner",
+        email: "splits@example.test",
+        password: "correct horse battery staple",
+        template: "small-business",
+      }),
+    });
+    const cookie = cookieFrom(setup);
+    const totpPage = await request(stub, "/app/security/totp", { headers: { cookie } });
+    const secret = /data-secret="([A-Z2-7]+)"/.exec(await totpPage.text())?.[1];
+    if (!secret) throw new Error("missing TOTP secret");
+    await request(stub, "/app/security/totp", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ code: await totpCode(secret, Date.now()) }),
+    });
+
+    const accountsHtml = await (
+      await request(stub, "/app/accounts", { headers: { cookie } })
+    ).text();
+    const expenseGuid = accountGuidFrom(accountsHtml, "Supplies");
+    const payableGuid = accountGuidFrom(accountsHtml, "Accounts Payable");
+    const bankGuid = accountGuidFrom(accountsHtml, "Business Checking");
+    expect(expenseGuid).not.toBe("");
+    expect(payableGuid).not.toBe("");
+    expect(bankGuid).not.toBe("");
+
+    const posted = await request(stub, "/app/journal", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        date: "2026-01-15",
+        description: "Supplier invoice with input tax",
+        "split-account-0": expenseGuid,
+        "split-amount-0": "100.00",
+        "split-account-1": bankGuid,
+        "split-amount-1": "19.00",
+        "split-account-2": payableGuid,
+        "split-amount-2": "-119.00",
+      }),
+    });
+    expect(posted.status).toBe(302);
+    expect(posted.headers.get("location")).toBe("/app/journal");
+
+    const journalHtml = await (
+      await request(stub, "/app/journal", { headers: { cookie } })
+    ).text();
+    expect(journalHtml).toContain("Supplier invoice with input tax");
+
+    const unbalanced = await request(stub, "/app/journal", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        date: "2026-01-16",
+        description: "Should not post",
+        "split-account-0": expenseGuid,
+        "split-amount-0": "10.00",
+        "split-account-1": payableGuid,
+        "split-amount-1": "-5.00",
+      }),
+    });
+    expect(unbalanced.status).toBe(200);
+    expect(await unbalanced.text()).toContain("must sum to zero");
+    expect(
+      await (await request(stub, "/app/journal", { headers: { cookie } })).text(),
+    ).not.toContain("Should not post");
+  });
 });
+
+function accountGuidFrom(html: string, name: string): string {
+  const pattern = new RegExp(
+    `data-account-guid="([0-9a-f]{32})" data-account-name="${name}"`,
+  );
+  return pattern.exec(html)?.[1] ?? "";
+}

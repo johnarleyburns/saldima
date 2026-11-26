@@ -21,6 +21,7 @@
     "check:licenses": "node scripts/license-scan.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "vectors": "tsx scripts/vectors.ts",
+    "fixtures:gronewald": "tsx scripts/import-gronewald-fixture.ts",
     "check:workflows": "./scripts/check-workflows.sh",
     "test:runtime": "vitest run --config vitest.runtime.config.ts",
     "vectors:check": "tsx scripts/vectors.ts --check",

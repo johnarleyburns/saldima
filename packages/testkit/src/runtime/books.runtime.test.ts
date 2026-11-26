@@ -181,9 +181,10 @@ describe("multi-company books", () => {
     const posted = await form(stub, "/app/journal", activeCookie, {
       date: "2026-11-24",
       description: "Acme sale",
-      from: checkingGuid,
-      to: salesGuid,
-      amount: "250.00",
+      "split-account-0": checkingGuid,
+      "split-amount-0": "250.00",
+      "split-account-1": salesGuid,
+      "split-amount-1": "-250.00",
     });
     expect(posted.status).toBe(302);
 

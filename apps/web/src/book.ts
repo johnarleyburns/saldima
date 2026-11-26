@@ -1765,10 +1765,16 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
       "SELECT tx_guid, account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
       bookId,
     );
+    const splitsByTx = new Map<string, typeof splits>();
+    for (const split of splits) {
+      const list = splitsByTx.get(split.tx_guid);
+      if (list) list.push(split);
+      else splitsByTx.set(split.tx_guid, [split]);
+    }
     const items = txs
+      .slice(0, 200)
       .map((tx) => {
-        const rows = splits
-          .filter((split) => split.tx_guid === tx.guid)
+        const rows = (splitsByTx.get(tx.guid) ?? [])
           .map(
             (split) =>
               `<li><span>${escapeHtml(accounts.get(split.account_guid) ?? "?")}</span><span class="amount">${formatMoney(money(BigInt(split.value_num), BigInt(split.value_denom)), 100n)}</span></li>`,
@@ -1783,11 +1789,16 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
         `<h1>General Journal</h1>
 <p class="muted">Every transaction in this book, like Tools → General Journal.</p>
 <p><a href="/app/journal/new" class="cta">New transaction</a></p>
-${items || `<p class="muted">No transactions yet.</p>`}`,
+${items || `<p class="muted">No transactions yet.</p>`}${txs.length > 200 ? `<p class="muted">Showing the most recent 200 of ${txs.length} transactions.</p>` : ""}`,
       ),
       200,
     );
   }
+
+  // Two legs are required (a simple payment); up to four more are optional,
+  // so a transaction with tax or fee splits (e.g. expense + input tax +
+  // payable) can be entered directly instead of needing a bulk import.
+  private static readonly SPLIT_ROWS = 6;
 
   private async newTransactionPage(c: BookContext, error = ""): Promise<Response> {
     const session = await this.currentSession(c);
@@ -1800,22 +1811,30 @@ ${items || `<p class="muted">No transactions yet.</p>`}`,
           `<option value="${escapeHtml(row.guid)}">${escapeHtml(row.name)}</option>`,
       )
       .join("");
+    const rows = Array.from(
+      { length: Book.SPLIT_ROWS },
+      (_, index) => `<label for="split-account-${index}">${
+        index < 2 ? "Account" : "Account (optional)"
+      }</label>
+<select id="split-account-${index}" name="split-account-${index}"${index < 2 ? " required" : ""}>
+<option value=""></option>
+${options}
+</select>
+<label for="split-amount-${index}">Amount${index >= 2 ? " (optional)" : ""}</label>
+<input id="split-amount-${index}" name="split-amount-${index}" inputmode="decimal"${index < 2 ? " required" : ""} placeholder="12.34 or -12.34">`,
+    ).join("\n");
     return c.html(
       this.appPage(
         "New transaction",
         `<h1>New transaction</h1>
 ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<p class="muted">Each split takes a signed amount; the splits used must sum to zero. Leave an optional split blank to skip it.</p>
 <form method="post" action="/app/journal">
 <label for="date">Date</label>
 <input id="date" name="date" type="date" required value="${nowIso().slice(0, 10)}">
 <label for="description">Description</label>
 <input id="description" name="description" type="text" required maxlength="200">
-<label for="from">From account</label>
-<select id="from" name="from" required>${options}</select>
-<label for="to">To account</label>
-<select id="to" name="to" required>${options}</select>
-<label for="amount">Amount</label>
-<input id="amount" name="amount" inputmode="decimal" required placeholder="12.34">
+${rows}
 <button type="submit">Post transaction</button>
 </form>
 <p><a href="/app/journal">Cancel</a></p>`,
@@ -1832,9 +1851,6 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     const body = await c.req.parseBody();
     const date = formValue(body, "date");
     const description = formValue(body, "description");
-    const from = formValue(body, "from");
-    const to = formValue(body, "to");
-    const amountText = formValue(body, "amount");
     const bookId = c.get("bookId");
     const accounts = new Set(this.visibleAccountRows(bookId).map((row) => row.guid));
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -1843,18 +1859,37 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!description || description.length > 200) {
       return this.newTransactionPage(c, "Enter a description.");
     }
-    if (!accounts.has(from) || !accounts.has(to) || from === to) {
-      return this.newTransactionPage(c, "Choose two different accounts.");
+
+    const splits: Array<{ account: string; value: Money }> = [];
+    for (let index = 0; index < Book.SPLIT_ROWS; index += 1) {
+      const account = formValue(body, `split-account-${index}`);
+      const amountText = formValue(body, `split-amount-${index}`);
+      if (!account && !amountText) continue;
+      if (!accounts.has(account)) {
+        return this.newTransactionPage(
+          c,
+          "Choose a valid account for every split used.",
+        );
+      }
+      let value: Money;
+      try {
+        value = parseMoneyHalfUp(amountText, 100n);
+      } catch {
+        return this.newTransactionPage(c, "Enter amounts like 12.34 or -12.34.");
+      }
+      if (equalsMoney(value, money(0n))) {
+        return this.newTransactionPage(c, "A split's amount must not be zero.");
+      }
+      splits.push({ account, value });
     }
-    let amount: Money;
-    try {
-      amount = parseMoneyHalfUp(amountText, 100n);
-    } catch {
-      return this.newTransactionPage(c, "Enter an amount like 12.34.");
+    if (splits.length < 2) {
+      return this.newTransactionPage(c, "Use at least two splits.");
     }
-    if (equalsMoney(amount, money(0n))) {
-      return this.newTransactionPage(c, "The amount must not be zero.");
+    const total = splits.reduce((sum, split) => addMoney(sum, split.value), money(0n));
+    if (!equalsMoney(total, money(0n))) {
+      return this.newTransactionPage(c, "The splits must sum to zero.");
     }
+
     const txGuid = newGuid();
     this.sql.exec(
       "INSERT INTO transactions (guid, book_id, currency_guid, post_date, description, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
@@ -1864,18 +1899,15 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       description,
       nowIso(),
     );
-    for (const [account, value] of [
-      [from, amount],
-      [to, money(-amount.num, amount.denom)],
-    ] as const) {
+    for (const split of splits) {
       this.sql.exec(
         "INSERT INTO splits (guid, book_id, tx_guid, account_guid, value_num, value_denom) VALUES (?, ?, ?, ?, ?, ?)",
         newGuid(),
         bookId,
         txGuid,
-        account,
-        value.num.toString(),
-        value.denom.toString(),
+        split.account,
+        split.value.num.toString(),
+        split.value.denom.toString(),
       );
     }
     return c.redirect("/app/journal");

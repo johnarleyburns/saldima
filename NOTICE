@@ -26,6 +26,12 @@ code copied from, the projects below.
   behavioural reference only; no code copied.
 - python3-gnucash — GPL bindings that run only in the isolated converter
   container and CI oracle, never linked into the application.
+- `fixtures/books/gronewald-gl-2023-01.gnucash` is derived from the synthetic
+  general-ledger dataset published with Gronewald, J., Stephan, S., Rombach,
+  A., & Fettke, P. (2026), "Generating Synthetic Journal Entries for Audit
+  Analytics: Method and Dataset," Data in Brief, and hosted at
+  https://doi.org/10.5281/zenodo.22014653, licensed CC BY 4.0. No real
+  financial or personal data is involved; the dataset is itself synthetic.
 
 The name "GnuCash" is a trademark of the GnuCash project. Saldima uses it only
 to describe compatibility.
