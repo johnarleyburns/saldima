@@ -114,10 +114,9 @@ describe("multi-company books", () => {
     expect(firstListHtml).toContain("My book");
     expect(firstListHtml).toContain("Personal");
     expect(firstListHtml).toContain("USD");
-    const dashboard = await request(stub, "/app", { headers: { cookie } });
-    const dashboardHtml = await dashboard.text();
-    expect(dashboardHtml).toContain('href="/app/books"');
-    expect(dashboardHtml).toContain("My book");
+    const appRoot = await request(stub, "/app", { headers: { cookie } });
+    expect(appRoot.status).toBe(302);
+    expect(appRoot.headers.get("location")).toBe("/app/books");
 
     const accountsA = await request(stub, "/app/accounts", {
       headers: { cookie },

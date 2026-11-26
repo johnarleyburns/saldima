@@ -67,7 +67,7 @@ async function enrollTotp(page: Page): Promise<string> {
   if (!secret) throw new Error("missing TOTP secret");
   await page.getByLabel("6-digit code").fill(totp(secret));
   await page.getByRole("button", { name: "Enable two-factor" }).click();
-  await expect(page.getByRole("heading", { name: "Your books" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Books" })).toBeVisible();
   return secret;
 }
 
@@ -100,9 +100,9 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   if (!secret) throw new Error("missing TOTP secret");
   await page.getByLabel("6-digit code").fill(totp(secret));
   await page.getByRole("button", { name: "Enable two-factor" }).click();
-  await expect(page.getByText(email)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Books" })).toBeVisible();
 
-  await page.getByRole("link", { name: /Chart of accounts/ }).click();
+  await page.getByRole("link", { name: "Accounts" }).click();
   await expect(page.getByText("Premium Trust")).toBeVisible();
   await page.getByRole("link", { name: "Add account" }).click();
   await page.getByLabel("Name").fill("Petty Cash");
@@ -136,13 +136,15 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   }
 
   await page.getByRole("link", { name: "Saldima" }).click();
+  await expect(page.getByRole("heading", { name: "Books" })).toBeVisible();
+  await page.getByRole("link", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 
   await login(page, testInfo, "alice", email);
   await page.getByLabel("6-digit code").fill(totp(secret));
   await page.getByRole("button", { name: "Verify" }).click();
-  await expect(page.getByText(email)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Books" })).toBeVisible();
 
   // The session is host-only: bob's book must still ask for a login.
   await page.goto(bookUrl("bob", testInfo, "/app"));
@@ -155,6 +157,7 @@ test("bob: a separate owner can set up and reach his own book", async ({
   const email = `bob-${testInfo.project.name}@example.test`;
   await fillSetup(page, testInfo, "bob", email);
   await enrollTotp(page);
+  await page.getByRole("link", { name: "Settings" }).click();
   await expect(page.getByText(email)).toBeVisible();
   await expect(
     page.getByText(new RegExp(`alice-${testInfo.project.name}@example`)),
