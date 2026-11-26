@@ -7,4 +7,5 @@ export * from "./money.ts";
 export * from "./new-guid.ts";
 export * from "./sqlite.ts";
 export * from "./versions.ts";
+export * from "./xml-document.ts";
 export * from "./xml-writer.ts";
