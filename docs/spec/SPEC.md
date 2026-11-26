@@ -3,6 +3,13 @@
 
 Nov 20, 2026 · @j
 
+> **Superseded (storage/encryption):** the Durable Object + Drizzle/SQLite
+> storage model and server-held encryption key described below are
+> superseded by `docs/architecture/TECHNICAL-DESIGN.md`. The canonical book
+> format is GnuCash XML, not SQLite tables, and the cloud component holds
+> ciphertext in R2 only — no Durable Object accounting store. Everything
+> else in this spec (product, pricing, phases) still applies.
+
 ## Summary
 
 Saldima is a hosted, GnuCash-compatible accounting app written in TypeScript and run entirely on Cloudflare. It covers what most people and small businesses use desktop GnuCash for, works fully on phones, and syncs both ways with desktop GnuCash by passing the real `.gnucash` file back and forth. Customers sign up with a card, pick a subdomain or bring their own domain, and get their own login and their own book. One plan: $5/month or $50/year, everything included, with a 30-day money-back guarantee.
