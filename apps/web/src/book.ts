@@ -15,6 +15,7 @@ import {
   type XmlAccount,
   type XmlCustomer,
   type XmlSplit,
+  type XmlTransaction,
 } from "@saldima/gnucash";
 import {
   categoryKey,
@@ -26,6 +27,8 @@ import {
   isLikelyDuplicate,
   parseImportFile,
   planImport,
+  serializeCsv,
+  serializeQif,
 } from "@saldima/importers";
 import { type Context, Hono } from "hono";
 import {
@@ -353,6 +356,12 @@ export class Book {
     );
     app.post("/app/accounts/:guid", (c) => this.updateAccount(c));
     app.post("/app/accounts/:guid/delete", (c) => this.deleteAccount(c));
+    app.get("/app/accounts/:guid/export/qif", (c) =>
+      this.exportAccountQif(c, c.req.param("guid") ?? ""),
+    );
+    app.get("/app/accounts/:guid/export/csv", (c) =>
+      this.exportAccountCsv(c, c.req.param("guid") ?? ""),
+    );
     app.get("/app/accounts/:guid/reconcile", (c) =>
       this.reconcilePage(c, c.req.param("guid") ?? ""),
     );
@@ -1166,6 +1175,11 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <button type="submit" class="danger">Delete account</button>
 </form>
 <p><a class="button secondary" href="/app/accounts/${escapeHtml(guid)}/reconcile">Reconcile</a></p>
+<p>
+<a href="/app/accounts/${escapeHtml(guid)}/export/qif">Export QIF</a>
+&middot;
+<a href="/app/accounts/${escapeHtml(guid)}/export/csv">Export CSV</a>
+</p>
 <p><a href="/app/accounts">Cancel</a></p>`,
       ),
       200,
@@ -1772,6 +1786,89 @@ ${
       headers: {
         "content-type": "application/gzip",
         "content-disposition": `attachment; filename="${bookExportFilename(book.name)}"`,
+      },
+    });
+  }
+
+  /**
+   * One account's register as `parseQif`/`parseCsv` rows: the other side of
+   * a two-split transaction becomes the QIF/CSV "category", matching how
+   * desktop GnuCash's own QIF export treats a simple transfer.
+   */
+  private registerExportRows(
+    document: { accounts(): XmlAccount[]; transactions(): XmlTransaction[] },
+    accountGuid: string,
+  ): ImportRow[] {
+    const names = new Map(
+      document.accounts().map((account) => [account.guid, account.name]),
+    );
+    const rows: ImportRow[] = [];
+    for (const transaction of document.transactions()) {
+      const mine = transaction.splits.filter(
+        (split) => split.accountGuid === accountGuid,
+      );
+      if (mine.length === 0) continue;
+      const others = transaction.splits.filter(
+        (split) => split.accountGuid !== accountGuid,
+      );
+      const firstOther = others[0];
+      const category =
+        others.length === 1 && firstOther
+          ? (names.get(firstOther.accountGuid) ?? "")
+          : "Split Transaction";
+      for (const split of mine) {
+        rows.push({
+          date: transaction.datePosted.slice(0, 10),
+          amount: split.value,
+          payee: transaction.description,
+          memo: split.memo,
+          reference: transaction.num,
+          category,
+          splits: [],
+        });
+      }
+    }
+    return rows.sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  private registerExportFilename(accountName: string, extension: string): string {
+    const safe = accountName
+      .trim()
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return `${safe || "account"}.${extension}`;
+  }
+
+  private async exportAccountQif(c: BookContext, guid: string): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const account = document?.account(guid);
+    if (!document || !account) return c.text("Account not found", 404);
+    const body = serializeQif(this.registerExportRows(document, guid));
+    return new Response(body, {
+      headers: {
+        "content-type": "text/qif",
+        "content-disposition": `attachment; filename="${this.registerExportFilename(account.name, "qif")}"`,
+      },
+    });
+  }
+
+  private async exportAccountCsv(c: BookContext, guid: string): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const account = document?.account(guid);
+    if (!document || !account) return c.text("Account not found", 404);
+    const body = serializeCsv(this.registerExportRows(document, guid));
+    return new Response(body, {
+      headers: {
+        "content-type": "text/csv",
+        "content-disposition": `attachment; filename="${this.registerExportFilename(account.name, "csv")}"`,
       },
     });
   }

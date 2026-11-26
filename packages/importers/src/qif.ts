@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { isZeroMoney, type Money } from "@saldima/gnucash";
+import { formatMoney, isZeroMoney, type Money } from "@saldima/gnucash";
 
 import { parseImportAmount } from "./amount.ts";
 import { parseImportDate } from "./date.ts";
@@ -121,4 +121,19 @@ export function parseQif(text: string): ImportResult {
     throw new ImportFormatError("No QIF transactions found.");
   }
   return { source: "qif", rows, warnings };
+}
+
+/** Writes a register's rows as a `!Type:Bank` QIF file, the inverse of `parseQif`. */
+export function serializeQif(rows: readonly ImportRow[]): string {
+  const lines: string[] = ["!Type:Bank"];
+  for (const row of rows) {
+    lines.push(`D${row.date}`);
+    lines.push(`T${formatMoney(row.amount, 100n)}`);
+    if (row.payee) lines.push(`P${row.payee}`);
+    if (row.memo) lines.push(`M${row.memo}`);
+    if (row.reference) lines.push(`N${row.reference}`);
+    if (row.category) lines.push(`L${row.category}`);
+    lines.push("^");
+  }
+  return `${lines.join("\n")}\n`;
 }

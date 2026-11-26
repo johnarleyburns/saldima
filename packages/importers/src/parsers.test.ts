@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { formatMoney } from "@saldima/gnucash";
 import { describe, expect, it } from "vitest";
-import { detectCsvMap, parseCsv, parseCsvTable } from "./csv.ts";
+import { detectCsvMap, parseCsv, parseCsvTable, serializeCsv } from "./csv.ts";
 import { detectImportSource, parseImportFile } from "./detect.ts";
 import { parseOfx } from "./ofx.ts";
-import { parseQif } from "./qif.ts";
+import { parseQif, serializeQif } from "./qif.ts";
 import { ImportFormatError } from "./types.ts";
 
 function amounts(values: ReadonlyArray<{ amount: { num: bigint; denom: bigint } }>) {
@@ -100,6 +100,40 @@ $9.00
     expect(result.rows[1]?.payee).toBe("Final");
     expect(result.warnings).toHaveLength(3);
   });
+
+  it("serializes rows into a file parseQif reads back exactly", () => {
+    const rows = parseQif(QIF).rows;
+    const serialized = serializeQif(rows);
+    expect(serialized.startsWith("!Type:Bank\n")).toBe(true);
+    const roundTripped = parseQif(serialized);
+    expect(
+      roundTripped.rows.map((row) => [
+        row.date,
+        row.payee,
+        row.memo,
+        row.category,
+        row.reference,
+      ]),
+    ).toEqual(
+      rows.map((row) => [row.date, row.payee, row.memo, row.category, row.reference]),
+    );
+    expect(amounts(roundTripped.rows)).toEqual(amounts(rows));
+  });
+
+  it("omits blank optional fields when serializing", () => {
+    const serialized = serializeQif([
+      {
+        date: "2026-03-01",
+        amount: { num: -500n, denom: 100n },
+        payee: "",
+        memo: "",
+        reference: "",
+        category: "",
+        splits: [],
+      },
+    ]);
+    expect(serialized).toBe("!Type:Bank\nD2026-03-01\nT-5.00\n^\n");
+  });
 });
 
 describe("CSV", () => {
@@ -187,6 +221,42 @@ not-a-date,Bad,5.00,
 
   it("throws when every row is unusable", () => {
     expect(() => parseCsv("Date,Amount\nnot-a-date,5.00")).toThrow(ImportFormatError);
+  });
+
+  it("serializes rows into a table parseCsv reads back exactly", () => {
+    const rows = parseCsv(`Date,Description,Amount,Category,Reference
+2024-01-05,"Coffee, shop",-4.50,Meals,1001
+2024-01-06,Paycheck,"2,000.00",Salary,
+`).rows;
+    const serialized = serializeCsv(rows);
+    expect(
+      serialized.startsWith("Date,Description,Memo,Amount,Category,Reference\n"),
+    ).toBe(true);
+    const roundTripped = parseCsv(serialized);
+    expect(
+      roundTripped.rows.map((row) => [
+        row.date,
+        row.payee,
+        row.category,
+        row.reference,
+      ]),
+    ).toEqual(rows.map((row) => [row.date, row.payee, row.category, row.reference]));
+    expect(amounts(roundTripped.rows)).toEqual(amounts(rows));
+  });
+
+  it("quotes cells containing commas, quotes or newlines", () => {
+    const serialized = serializeCsv([
+      {
+        date: "2024-01-01",
+        amount: { num: -100n, denom: 100n },
+        payee: 'Coffee, "the" shop',
+        memo: "",
+        reference: "",
+        category: "",
+        splits: [],
+      },
+    ]);
+    expect(serialized).toContain('"Coffee, ""the"" shop"');
   });
 });
 
