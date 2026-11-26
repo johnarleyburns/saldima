@@ -10,7 +10,7 @@ import {
   newGuid,
   parseMoneyHalfUp,
   readBookSnapshot,
-  writeGnuCashXml,
+  type XmlAccount,
 } from "@saldima/gnucash";
 import {
   categoryKey,
@@ -44,6 +44,7 @@ import {
   verifyTotp,
 } from "./auth.ts";
 import { bookTotals, rolledUpTotals, sumSplitBalances } from "./balances.ts";
+import { BookXmlStore } from "./book-xml-store.ts";
 import {
   BOOK_COOKIE,
   BOOK_CURRENCIES,
@@ -55,9 +56,7 @@ import {
   normaliseCurrency,
   resolveBookId,
 } from "./books.ts";
-import { deleteAccount } from "./data-access/accounts.ts";
 import { deleteSession, deleteSetupToken } from "./data-access/auth-store.ts";
-import { replaceBook } from "./data-access/book-import.ts";
 import { deleteBook } from "./data-access/books.ts";
 import {
   deleteImportBatch,
@@ -66,6 +65,7 @@ import {
   type StagedImport,
 } from "./data-access/imports.ts";
 import { designCss } from "./design.ts";
+import type { R2BucketLike } from "./ports/cloudflare-r2.ts";
 import { totpQrSvg } from "./qr.ts";
 import { balanceSheet, incomeStatement, trialBalance } from "./reports.ts";
 import {
@@ -90,6 +90,7 @@ export interface BookEnv {
   SETUP_TOKEN?: string;
   PROVISION_SECRET?: string;
   MASTER_KEY?: string;
+  R2: R2BucketLike;
 }
 
 interface SqlCursorLike {
@@ -148,13 +149,25 @@ interface AccountRow {
   name: string;
   account_type: string;
   parent_guid: string | null;
-  code: string | null;
-  hidden: number;
-  placeholder: number;
+  code: string;
+  hidden: boolean;
+  placeholder: boolean;
 }
 
 interface AccountNode extends AccountRow {
   children: AccountNode[];
+}
+
+function toAccountRow(account: XmlAccount): AccountRow {
+  return {
+    guid: account.guid,
+    name: account.name,
+    account_type: account.type,
+    parent_guid: account.parentGuid,
+    code: account.code,
+    hidden: account.hidden,
+    placeholder: account.placeholder,
+  };
 }
 
 const SESSION_SECONDS = 30 * 24 * 60 * 60;
@@ -190,12 +203,18 @@ function formValue(body: Record<string, unknown>, key: string): string {
 
 export class Book {
   private readonly app: BookApp;
+  private readonly store: BookXmlStore;
 
   constructor(
     private readonly state: DurableObjectStateLike,
     private readonly env: BookEnv,
   ) {
     this.migrate();
+    this.store = new BookXmlStore(
+      this.env.R2,
+      this.state.id.toString(),
+      this.env.MASTER_KEY ?? "",
+    );
     this.app = this.buildApp();
   }
 
@@ -205,14 +224,6 @@ export class Book {
 
   private rows<T>(query: string, ...bindings: Array<string | number | null>): T[] {
     return this.sql.exec(query, ...bindings).toArray() as T[];
-  }
-
-  private ensureColumn(table: string, column: string, definition: string): void {
-    const present = this.rows<{ name: string }>(`PRAGMA table_info(${table})`).some(
-      (row) => row.name === column,
-    );
-    if (!present)
-      this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   private migrate(): void {
@@ -275,53 +286,6 @@ export class Book {
     this.sql.exec(
       "CREATE INDEX IF NOT EXISTS import_batches_book_idx ON gcw_import_batches(book_id)",
     );
-    this.sql.exec(
-      `CREATE TABLE IF NOT EXISTS accounts (
-        guid TEXT PRIMARY KEY,
-        book_id TEXT NOT NULL DEFAULT 'main',
-        name TEXT NOT NULL,
-        account_type TEXT NOT NULL,
-        commodity_guid TEXT,
-        parent_guid TEXT,
-        code TEXT,
-        description TEXT,
-        hidden INTEGER NOT NULL DEFAULT 0,
-        placeholder INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
-      )`,
-    );
-    this.sql.exec(
-      `CREATE TABLE IF NOT EXISTS transactions (
-        guid TEXT PRIMARY KEY,
-        book_id TEXT NOT NULL DEFAULT 'main',
-        currency_guid TEXT,
-        post_date TEXT NOT NULL,
-        description TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )`,
-    );
-    this.sql.exec(
-      `CREATE TABLE IF NOT EXISTS splits (
-        guid TEXT PRIMARY KEY,
-        book_id TEXT NOT NULL DEFAULT 'main',
-        tx_guid TEXT NOT NULL,
-        account_guid TEXT NOT NULL,
-        value_num TEXT NOT NULL,
-        value_denom TEXT NOT NULL
-      )`,
-    );
-    for (const table of ["accounts", "transactions", "splits"]) {
-      this.ensureColumn(table, "book_id", "TEXT NOT NULL DEFAULT 'main'");
-      this.sql.exec(
-        `UPDATE ${table} SET book_id = ? WHERE book_id IS NULL OR book_id = ''`,
-        DEFAULT_BOOK_ID,
-      );
-    }
-    this.sql.exec("CREATE INDEX IF NOT EXISTS accounts_book_idx ON accounts(book_id)");
-    this.sql.exec(
-      "CREATE INDEX IF NOT EXISTS transactions_book_idx ON transactions(book_id)",
-    );
-    this.sql.exec("CREATE INDEX IF NOT EXISTS splits_book_idx ON splits(book_id)");
     this.sql.exec(
       `INSERT INTO gcw_books (id, name, template_id, currency, created_at)
        SELECT ?, ?, 'personal', 'USD', ?
@@ -637,7 +601,7 @@ ${TEMPLATE_IDS.map((id) => `<option value="${id}">${escapeHtml(templateById(id).
     );
     const template = templateById(formValue(body, "template"));
     const bookId = c.get("bookId");
-    this.seedAccounts(template, bookId);
+    await this.seedAccounts(template, bookId);
     this.sql.exec(
       "UPDATE gcw_books SET template_id = ? WHERE id = ?",
       template.id,
@@ -791,17 +755,20 @@ ${setupBlock}
     return Number(rows[0]?.count ?? 0);
   }
 
-  private accountRows(bookId: string): AccountRow[] {
-    return this.rows<AccountRow>(
-      `SELECT guid, name, account_type, parent_guid, code, hidden, placeholder
-       FROM accounts WHERE book_id = ? ORDER BY name`,
-      bookId,
-    );
+  private async accountRows(bookId: string): Promise<AccountRow[]> {
+    const document = await this.store.get(bookId);
+    if (!document) return [];
+    return document
+      .accounts()
+      .map(toAccountRow)
+      .sort((left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+      );
   }
 
   /** What the Accounts window shows: no structural ROOT and no template tree. */
-  private visibleAccountRows(bookId: string): AccountRow[] {
-    const rows = this.accountRows(bookId);
+  private async visibleAccountRows(bookId: string): Promise<AccountRow[]> {
+    const rows = await this.accountRows(bookId);
     const excluded = new Set<string>();
     const templateRoot = rows.find(
       (row) =>
@@ -826,46 +793,69 @@ ${setupBlock}
     return rows.filter((row) => row.account_type !== "ROOT" && !excluded.has(row.guid));
   }
 
-  private splitRows(bookId: string): Array<{ accountGuid: string; value: Money }> {
-    return this.rows<{ account_guid: string; value_num: string; value_denom: string }>(
-      "SELECT account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
+  private async splitRows(
+    bookId: string,
+  ): Promise<Array<{ accountGuid: string; value: Money }>> {
+    const document = await this.store.get(bookId);
+    if (!document) return [];
+    return document
+      .transactions()
+      .flatMap((transaction) => transaction.splits)
+      .map((split) => ({ accountGuid: split.accountGuid, value: split.value }));
+  }
+
+  private async balanceMap(bookId: string): Promise<Map<string, Money>> {
+    return sumSplitBalances(await this.splitRows(bookId));
+  }
+
+  /**
+   * Bootstraps a brand-new book's live XML document (a fresh company or the
+   * owner's first book) and creates its chart of accounts from a template.
+   */
+  private async seedAccounts(template: BookTemplate, bookId: string): Promise<void> {
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    const bookGuid = (await sha256Hex(`${this.state.id.toString()}:${bookId}`)).slice(
+      0,
+      32,
+    );
+    const document = await this.store.replace(
       bookId,
-    ).map((row) => ({
-      accountGuid: row.account_guid,
-      value: money(BigInt(row.value_num), BigInt(row.value_denom)),
-    }));
-  }
-
-  private balanceMap(bookId: string): Map<string, Money> {
-    return sumSplitBalances(this.splitRows(bookId));
-  }
-
-  private seedAccounts(template: BookTemplate, bookId: string): void {
+      {
+        bookGuid,
+        currencyCode: currency,
+        fraction: 100,
+        accounts: [],
+        transactions: [],
+      },
+      nowIso(),
+    );
+    const root = document.accounts().find((account) => account.type === "ROOT");
+    if (!root) throw new Error("bootstrap book has no root account");
+    const commodity = { space: "CURRENCY", id: currency };
     const guids = new Map<string, string>();
     for (const row of flattenTemplate(template)) {
-      const parent = row.parentPath ? (guids.get(row.parentPath) ?? null) : null;
-      const guid = newGuid();
-      this.sql.exec(
-        `INSERT INTO accounts
-         (guid, book_id, name, account_type, commodity_guid, parent_guid, code,
-          description, hidden, placeholder, created_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)`,
-        guid,
-        bookId,
-        row.name,
-        row.type,
-        parent,
-        row.code,
-        row.hidden ? 1 : 0,
-        row.placeholder ? 1 : 0,
-        nowIso(),
+      const parentGuid = row.parentPath
+        ? (guids.get(row.parentPath) ?? root.guid)
+        : root.guid;
+      const account = document.createAccount(
+        {
+          name: row.name,
+          type: row.type,
+          parentGuid,
+          commodity,
+          code: row.code ?? "",
+          hidden: row.hidden,
+          placeholder: row.placeholder,
+        },
+        newGuid(),
       );
-      guids.set(row.path, guid);
+      guids.set(row.path, account.guid);
     }
+    await this.store.save(bookId, document, nowIso());
   }
 
-  private accountsTree(bookId: string): AccountNode[] {
-    const rows = this.visibleAccountRows(bookId);
+  private async accountsTree(bookId: string): Promise<AccountNode[]> {
+    const rows = await this.visibleAccountRows(bookId);
     const nodes = new Map<string, AccountNode>();
     for (const row of rows) nodes.set(row.guid, { ...row, children: [] });
     const roots: AccountNode[] = [];
@@ -919,11 +909,11 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     return `<ul class="accounts">${items}</ul>`;
   }
 
-  private accountOptions(
+  private async accountOptions(
     bookId: string,
     exclude: ReadonlySet<string> = new Set(),
     selected = "",
-  ): string {
+  ): Promise<string> {
     const visit = (nodes: AccountNode[], depth: number): string =>
       nodes
         .map((node) => {
@@ -933,31 +923,32 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
           return `<option value="${escapeHtml(node.guid)}"${chosen}>${escapeHtml(label)}</option>${visit(node.children, depth + 1)}`;
         })
         .join("");
-    return `<option value=""${selected === "" ? " selected" : ""}>No parent (top level)</option>${visit(this.accountsTree(bookId), 0)}`;
+    const tree = await this.accountsTree(bookId);
+    return `<option value=""${selected === "" ? " selected" : ""}>No parent (top level)</option>${visit(tree, 0)}`;
   }
 
-  private accountByGuid(guid: string, bookId: string): AccountRow | null {
-    return (
-      this.rows<AccountRow>(
-        `SELECT guid, name, account_type, parent_guid, code, hidden, placeholder
-         FROM accounts WHERE guid = ? AND book_id = ? LIMIT 1`,
-        guid,
-        bookId,
-      )[0] ?? null
-    );
+  private async accountByGuid(
+    guid: string,
+    bookId: string,
+  ): Promise<AccountRow | null> {
+    const document = await this.store.get(bookId);
+    const account = document?.account(guid);
+    return account ? toAccountRow(account) : null;
   }
 
   /** Structural roots and template accounts are never edited from the tree. */
-  private editableAccount(guid: string, bookId: string): AccountRow | null {
-    const account = this.accountByGuid(guid, bookId);
+  private async editableAccount(
+    guid: string,
+    bookId: string,
+  ): Promise<AccountRow | null> {
+    const account = await this.accountByGuid(guid, bookId);
     if (!account) return null;
-    return this.visibleAccountRows(bookId).some((row) => row.guid === guid)
-      ? account
-      : null;
+    const visible = await this.visibleAccountRows(bookId);
+    return visible.some((row) => row.guid === guid) ? account : null;
   }
 
-  private descendantGuids(guid: string, bookId: string): Set<string> {
-    const rows = this.visibleAccountRows(bookId);
+  private async descendantGuids(guid: string, bookId: string): Promise<Set<string>> {
+    const rows = await this.visibleAccountRows(bookId);
     const children = new Map<string, string[]>();
     for (const row of rows) {
       if (row.parent_guid) {
@@ -980,53 +971,47 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     return found;
   }
 
-  private childCount(guid: string, bookId: string): number {
-    const row = this.rows<{ count: number }>(
-      "SELECT count(*) AS count FROM accounts WHERE parent_guid = ? AND book_id = ?",
-      guid,
-      bookId,
-    )[0];
-    return Number(row?.count ?? 0);
+  private async childCount(guid: string, bookId: string): Promise<number> {
+    const rows = await this.accountRows(bookId);
+    return rows.filter((row) => row.parent_guid === guid).length;
   }
 
-  private importAccounts(bookId: string): AccountRow[] {
-    return this.visibleAccountRows(bookId).filter(
-      (account) => !account.placeholder && !account.hidden,
-    );
+  private async importAccounts(bookId: string): Promise<AccountRow[]> {
+    const rows = await this.visibleAccountRows(bookId);
+    return rows.filter((account) => !account.placeholder && !account.hidden);
   }
 
-  private importTargetAccounts(bookId: string): AccountRow[] {
-    return this.importAccounts(bookId).filter((account) =>
-      IMPORT_TARGET_TYPES.has(account.account_type),
-    );
+  private async importTargetAccounts(bookId: string): Promise<AccountRow[]> {
+    const accounts = await this.importAccounts(bookId);
+    return accounts.filter((account) => IMPORT_TARGET_TYPES.has(account.account_type));
   }
 
   /** Unmatched rows post to a visible "Imports" equity account. */
-  private ensureImportsAccount(bookId: string): string {
-    const existing = this.accountRows(bookId).find(
-      (account) => account.name.trim().toLowerCase() === "imports",
-    );
+  private async ensureImportsAccount(bookId: string): Promise<string> {
+    const document = await this.store.get(bookId);
+    if (!document) throw new Error("book not found");
+    const existing = document
+      .accounts()
+      .find((account) => account.name.trim().toLowerCase() === "imports");
     if (existing) {
       if (existing.hidden || existing.placeholder) {
-        this.sql.exec(
-          "UPDATE accounts SET hidden = 0, placeholder = 0 WHERE guid = ? AND book_id = ?",
-          existing.guid,
-          bookId,
-        );
+        document.updateAccount(existing.guid, { hidden: false, placeholder: false });
+        await this.store.save(bookId, document, nowIso());
       }
       return existing.guid;
     }
-    const guid = newGuid();
-    this.sql.exec(
-      `INSERT INTO accounts
-       (guid, book_id, name, account_type, commodity_guid, parent_guid, code,
-        description, hidden, placeholder, created_at)
-       VALUES (?, ?, 'Imports', 'EQUITY', NULL, NULL, NULL, NULL, 0, 0, ?)`,
-      guid,
-      bookId,
-      nowIso(),
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    const created = document.createAccount(
+      {
+        name: "Imports",
+        type: "EQUITY",
+        parentGuid: null,
+        commodity: { space: "CURRENCY", id: currency },
+      },
+      newGuid(),
     );
-    return guid;
+    await this.store.save(bookId, document, nowIso());
+    return created.guid;
   }
 
   private stagedImport(id: string, bookId: string): StagedImport | null {
@@ -1056,21 +1041,20 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
       : null;
   }
 
-  private splitHistory(
+  private async splitHistory(
     bookId: string,
     accountGuid: string,
-  ): Array<{ date: string; amount: Money }> {
-    return this.rows<{ post_date: string; value_num: string; value_denom: string }>(
-      `SELECT t.post_date, s.value_num, s.value_denom
-       FROM splits s JOIN transactions t ON t.guid = s.tx_guid
-       WHERE s.book_id = ? AND t.book_id = ? AND s.account_guid = ?`,
-      bookId,
-      bookId,
-      accountGuid,
-    ).map((row) => ({
-      date: row.post_date.slice(0, 10),
-      amount: money(BigInt(row.value_num), BigInt(row.value_denom)),
-    }));
+  ): Promise<Array<{ date: string; amount: Money }>> {
+    const document = await this.store.get(bookId);
+    if (!document) return [];
+    return document.transactions().flatMap((transaction) =>
+      transaction.splits
+        .filter((split) => split.accountGuid === accountGuid)
+        .map((split) => ({
+          date: transaction.datePosted.slice(0, 10),
+          amount: split.value,
+        })),
+    );
   }
 
   private importCategories(rows: readonly ImportRow[]): string[] {
@@ -1108,8 +1092,15 @@ ${this.renderAccountTree(node.children, depth + 1, balances)}
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const account = this.editableAccount(guid, c.get("bookId"));
+    const bookId = c.get("bookId");
+    const account = await this.editableAccount(guid, bookId);
     if (!account) return c.text("Account not found", 404);
+    const excluded = await this.descendantGuids(guid, bookId);
+    const parentOptions = await this.accountOptions(
+      bookId,
+      excluded,
+      account.parent_guid ?? "",
+    );
     return c.html(
       this.appPage(
         "Edit account",
@@ -1121,7 +1112,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <label for="type">Type</label>
 <select id="type" name="type">${ACCOUNT_TYPES.map((type) => `<option value="${type}"${type === account.account_type ? " selected" : ""}>${type}</option>`).join("")}</select>
 <label for="parent">Parent</label>
-<select id="parent" name="parent">${this.accountOptions(c.get("bookId"), this.descendantGuids(guid, c.get("bookId")), account.parent_guid ?? "")}</select>
+<select id="parent" name="parent">${parentOptions}</select>
 <label for="code">Code</label>
 <input id="code" name="code" type="text" maxlength="40" value="${escapeHtml(account.code ?? "")}">
 <label for="description">Description</label>
@@ -1146,7 +1137,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const guid = c.req.param("guid") ?? "";
     const bookId = c.get("bookId");
-    const account = guid ? this.editableAccount(guid, bookId) : null;
+    const account = guid ? await this.editableAccount(guid, bookId) : null;
     if (!account) return c.text("Account not found", 404);
     const body = await c.req.parseBody();
     const name = formValue(body, "name");
@@ -1160,11 +1151,9 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       );
     }
     if (parent) {
-      const visible = this.visibleAccountRows(bookId);
-      if (
-        !visible.some((row) => row.guid === parent) ||
-        this.descendantGuids(guid, bookId).has(parent)
-      ) {
+      const visible = await this.visibleAccountRows(bookId);
+      const descendants = await this.descendantGuids(guid, bookId);
+      if (!visible.some((row) => row.guid === parent) || descendants.has(parent)) {
         return this.editAccountPage(
           c,
           guid,
@@ -1172,21 +1161,18 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
         );
       }
     }
-    this.sql.exec(
-      `UPDATE accounts
-       SET name = ?, account_type = ?, parent_guid = ?, code = ?,
-           description = ?, hidden = ?, placeholder = ?
-       WHERE guid = ? AND book_id = ?`,
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    document.updateAccount(guid, {
       name,
       type,
-      parent || null,
-      formValue(body, "code") || null,
-      formValue(body, "description") || null,
-      body.hidden === "on" ? 1 : 0,
-      body.placeholder === "on" ? 1 : 0,
-      guid,
-      bookId,
-    );
+      parentGuid: parent || null,
+      code: formValue(body, "code") || "",
+      description: formValue(body, "description") || "",
+      hidden: body.hidden === "on",
+      placeholder: body.placeholder === "on",
+    });
+    await this.store.save(bookId, document, nowIso());
     return c.redirect("/app/accounts");
   }
 
@@ -1197,16 +1183,19 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const guid = c.req.param("guid") ?? "";
     const bookId = c.get("bookId");
-    const account = guid ? this.editableAccount(guid, bookId) : null;
+    const account = guid ? await this.editableAccount(guid, bookId) : null;
     if (!account) return c.text("Account not found", 404);
-    if (this.childCount(guid, bookId) > 0) {
+    if ((await this.childCount(guid, bookId)) > 0) {
       return this.editAccountPage(
         c,
         guid,
         "Move or delete this account's children before deleting it.",
       );
     }
-    deleteAccount(this.sql, guid, bookId);
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    document.deleteAccount(guid);
+    await this.store.save(bookId, document, nowIso());
     return c.redirect("/app/accounts");
   }
 
@@ -1216,8 +1205,9 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const bookId = c.get("bookId");
     const book = this.activeBook(c);
-    const balances = this.balanceMap(bookId);
-    const rows = this.visibleAccountRows(bookId);
+    const balances = await this.balanceMap(bookId);
+    const rows = await this.visibleAccountRows(bookId);
+    const tree = await this.accountsTree(bookId);
     const totals = bookTotals(rows, balances);
     return c.html(
       this.appPage(
@@ -1235,7 +1225,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <a class="button secondary" href="/app/import">Import</a>
 <a class="button secondary" href="/app/export/xml">Export</a>
 </p>
-${this.renderAccountTree(this.accountsTree(bookId), 0, rolledUpTotals(rows, balances))}`,
+${this.renderAccountTree(tree, 0, rolledUpTotals(rows, balances))}`,
       ),
       200,
     );
@@ -1284,7 +1274,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       return this.importPage(c, "The book has no accounts.");
     }
     const bookId = c.get("bookId");
-    replaceBook(this.sql, snapshot, newGuid, nowIso(), bookId);
+    await this.store.replace(bookId, snapshot, nowIso());
     this.sql.exec("UPDATE gcw_books SET template_id = 'imported' WHERE id = ?", bookId);
     if (snapshot.currencyCode) {
       this.sql.exec(
@@ -1301,7 +1291,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const bookId = c.get("bookId");
-    const targets = this.importTargetAccounts(bookId);
+    const targets = await this.importTargetAccounts(bookId);
     return c.html(
       this.appPage(
         "Import transactions",
@@ -1336,7 +1326,7 @@ ${targets.map((account) => `<option value="${escapeHtml(account.guid)}">${escape
     const body = await c.req.parseBody();
     const bookId = c.get("bookId");
     const targetGuid = formValue(body, "target");
-    const target = targetGuid ? this.accountByGuid(targetGuid, bookId) : null;
+    const target = targetGuid ? await this.accountByGuid(targetGuid, bookId) : null;
     if (
       !target ||
       target.placeholder ||
@@ -1392,7 +1382,7 @@ ${targets.map((account) => `<option value="${escapeHtml(account.guid)}">${escape
     const id = c.req.param("id") ?? "";
     const batch = id ? this.stagedImport(id, bookId) : null;
     if (!batch) return c.text("Import not found", 404);
-    const target = this.accountByGuid(batch.targetAccountGuid, bookId);
+    const target = await this.accountByGuid(batch.targetAccountGuid, bookId);
     if (!target) {
       deleteImportBatch(this.sql, batch.id, bookId);
       return c.text("The statement account no longer exists", 404);
@@ -1404,13 +1394,13 @@ ${targets.map((account) => `<option value="${escapeHtml(account.guid)}">${escape
       deleteImportBatch(this.sql, batch.id, bookId);
       return c.text("That staged import is no longer readable", 404);
     }
-    const history = this.splitHistory(bookId, target.guid);
+    const history = await this.splitHistory(bookId, target.guid);
     const duplicates = rows.map((row) => isLikelyDuplicate(row, history));
     const duplicateCount = duplicates.filter(Boolean).length;
-    const accounts = this.importAccounts(bookId);
-    const importsGuid = this.ensureImportsAccount(bookId);
+    const accounts = await this.importAccounts(bookId);
+    const importsGuid = await this.ensureImportsAccount(bookId);
     if (!accounts.some((account) => account.guid === importsGuid)) {
-      const imports = this.accountByGuid(importsGuid, bookId);
+      const imports = await this.accountByGuid(importsGuid, bookId);
       if (imports) accounts.push(imports);
     }
     const byName = new Map(
@@ -1473,7 +1463,7 @@ ${
     const id = c.req.param("id") ?? "";
     const batch = id ? this.stagedImport(id, bookId) : null;
     if (!batch) return c.text("Import not found", 404);
-    const target = this.accountByGuid(batch.targetAccountGuid, bookId);
+    const target = await this.accountByGuid(batch.targetAccountGuid, bookId);
     if (!target) {
       deleteImportBatch(this.sql, batch.id, bookId);
       return c.text("The statement account no longer exists", 404);
@@ -1487,7 +1477,9 @@ ${
     }
     const body = await c.req.parseBody();
     const defaultGuid = formValue(body, "default_account");
-    const defaultAccount = defaultGuid ? this.accountByGuid(defaultGuid, bookId) : null;
+    const defaultAccount = defaultGuid
+      ? await this.accountByGuid(defaultGuid, bookId)
+      : null;
     if (
       !defaultAccount ||
       defaultAccount.placeholder ||
@@ -1496,7 +1488,8 @@ ${
     ) {
       return this.importMappingPage(c, "Choose where unmatched rows should post.");
     }
-    const accounts = new Set(this.importAccounts(bookId).map((row) => row.guid));
+    const importAccounts = await this.importAccounts(bookId);
+    const accounts = new Set(importAccounts.map((row) => row.guid));
     const categoryAccounts: Record<string, string> = {};
     const categories = this.importCategories(rows);
     for (const [index, key] of categories.entries()) {
@@ -1506,7 +1499,7 @@ ${
       }
       categoryAccounts[key] = guid;
     }
-    const history = this.splitHistory(bookId, target.guid);
+    const history = await this.splitHistory(bookId, target.guid);
     const includeDuplicates = body.include_duplicates === "on";
     const selected = rows.filter(
       (row) => includeDuplicates || !isLikelyDuplicate(row, history),
@@ -1522,9 +1515,8 @@ ${
       defaultAccountGuid: defaultAccount.guid,
       categoryAccounts,
     });
-    const knownAccounts = new Set(
-      this.visibleAccountRows(bookId).map((row) => row.guid),
-    );
+    const visibleRows = await this.visibleAccountRows(bookId);
+    const knownAccounts = new Set(visibleRows.map((row) => row.guid));
     for (const transaction of planned) {
       let total = money(0n);
       for (const split of transaction.splits) {
@@ -1536,31 +1528,29 @@ ${
       if (transaction.splits.length < 2 || !isZeroMoney(total)) {
         return this.importMappingPage(c, "That statement could not be balanced.");
       }
-      const txGuid = newGuid();
-      this.sql.exec(
-        `INSERT INTO transactions
-         (guid, book_id, currency_guid, post_date, description, created_at)
-         VALUES (?, ?, NULL, ?, ?, ?)`,
-        txGuid,
-        bookId,
-        transaction.date,
-        transaction.description,
-        nowIso(),
-      );
-      for (const split of transaction.splits) {
-        this.sql.exec(
-          `INSERT INTO splits
-           (guid, book_id, tx_guid, account_guid, value_num, value_denom)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          newGuid(),
-          bookId,
-          txGuid,
-          split.accountGuid,
-          split.value.num.toString(),
-          split.value.denom.toString(),
-        );
-      }
     }
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    for (const transaction of planned) {
+      document.postTransaction(
+        {
+          currency: { space: "CURRENCY", id: currency },
+          datePosted: `${transaction.date} 00:00:00 +0000`,
+          dateEntered: `${transaction.date} 00:00:00 +0000`,
+          description: transaction.description,
+          splits: transaction.splits.map((split) => ({
+            accountGuid: split.accountGuid,
+            value: split.value,
+          })),
+        },
+        {
+          transaction: newGuid(),
+          splits: transaction.splits.map(() => newGuid()),
+        },
+      );
+    }
+    await this.store.save(bookId, document, nowIso());
     deleteImportBatch(this.sql, batch.id, bookId);
     return c.redirect("/app/journal");
   }
@@ -1575,72 +1565,21 @@ ${
     return c.redirect("/app/import/transactions");
   }
 
+  /**
+   * The live document is already real GnuCash XML (the same shape desktop
+   * GnuCash writes), so export is just handing over its current bytes --
+   * no snapshot rebuild needed.
+   */
   private async exportXml(c: BookContext): Promise<Response> {
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const tenantId = c.get("tenantId");
     const bookId = c.get("bookId");
     const book = this.activeBook(c);
-    const currency = book.currency;
-    const allAccounts = this.accountRows(bookId);
-    const templateRootGuid =
-      allAccounts.find(
-        (row) =>
-          row.account_type === "ROOT" &&
-          row.name.trim().toLowerCase() === "template root",
-      )?.guid ?? null;
-    const accounts = allAccounts.map((row) => ({
-      guid: row.guid,
-      name: row.name,
-      type: row.account_type,
-      parentGuid: row.parent_guid,
-      commodityCode: currency,
-      code: row.code ?? "",
-      description: "",
-      hidden: row.hidden === 1,
-      placeholder: row.placeholder === 1,
-    }));
-    const splitRows = this.rows<{
-      guid: string;
-      tx_guid: string;
-      account_guid: string;
-      value_num: string;
-      value_denom: string;
-    }>(
-      "SELECT guid, tx_guid, account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
-      bookId,
-    );
-    const transactions = this.rows<{
-      guid: string;
-      post_date: string;
-      description: string;
-    }>(
-      "SELECT guid, post_date, description FROM transactions WHERE book_id = ? ORDER BY post_date",
-      bookId,
-    ).map((tx) => ({
-      guid: tx.guid,
-      date: tx.post_date.slice(0, 10),
-      description: tx.description,
-      currencyCode: currency,
-      splits: splitRows
-        .filter((split) => split.tx_guid === tx.guid)
-        .map((split) => ({
-          guid: split.guid,
-          accountGuid: split.account_guid,
-          value: money(BigInt(split.value_num), BigInt(split.value_denom)),
-        })),
-    }));
-    const xml = writeGnuCashXml({
-      bookGuid: (await sha256Hex(`${tenantId}:${bookId}`)).slice(0, 32),
-      currencyCode: currency,
-      fraction: 100,
-      accounts,
-      transactions,
-      templateRootGuid,
-    });
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
     const gzipped = await new Response(
-      new Blob([new TextEncoder().encode(xml)])
+      new Blob([new TextEncoder().encode(document.serialize())])
         .stream()
         .pipeThrough(new CompressionStream("gzip")),
     ).arrayBuffer();
@@ -1656,12 +1595,14 @@ ${
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const accounts = this.visibleAccountRows(c.get("bookId")).map((row) => ({
+    const bookId = c.get("bookId");
+    const visible = await this.visibleAccountRows(bookId);
+    const accounts = visible.map((row) => ({
       guid: row.guid,
       name: row.name,
       account_type: row.account_type,
     }));
-    const splits = this.splitRows(c.get("bookId"));
+    const splits = await this.splitRows(bookId);
     const trial = trialBalance(accounts, splits);
     const sheet = balanceSheet(accounts, splits);
     const pnl = incomeStatement(accounts, splits);
@@ -1749,38 +1690,27 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
     const accounts = new Map(
-      this.accountRows(bookId).map((row) => [row.guid, row.name]),
+      (document?.accounts() ?? []).map((row) => [row.guid, row.name]),
     );
-    const txs = this.rows<{ guid: string; post_date: string; description: string }>(
-      "SELECT guid, post_date, description FROM transactions WHERE book_id = ? ORDER BY post_date DESC, guid",
-      bookId,
-    );
-    const splits = this.rows<{
-      tx_guid: string;
-      account_guid: string;
-      value_num: string;
-      value_denom: string;
-    }>(
-      "SELECT tx_guid, account_guid, value_num, value_denom FROM splits WHERE book_id = ?",
-      bookId,
-    );
-    const splitsByTx = new Map<string, typeof splits>();
-    for (const split of splits) {
-      const list = splitsByTx.get(split.tx_guid);
-      if (list) list.push(split);
-      else splitsByTx.set(split.tx_guid, [split]);
-    }
+    const txs = (document?.transactions() ?? [])
+      .slice()
+      .sort((left, right) =>
+        left.datePosted === right.datePosted
+          ? left.guid.localeCompare(right.guid)
+          : right.datePosted.localeCompare(left.datePosted),
+      );
     const items = txs
       .slice(0, 200)
       .map((tx) => {
-        const rows = (splitsByTx.get(tx.guid) ?? [])
+        const rows = tx.splits
           .map(
             (split) =>
-              `<li><span>${escapeHtml(accounts.get(split.account_guid) ?? "?")}</span><span class="amount">${formatMoney(money(BigInt(split.value_num), BigInt(split.value_denom)), 100n)}</span></li>`,
+              `<li><span>${escapeHtml(accounts.get(split.accountGuid) ?? "?")}</span><span class="amount">${formatMoney(split.value, 100n)}</span></li>`,
           )
           .join("");
-        return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}</h2><p class="muted">${escapeHtml(tx.post_date)}</p><ul class="journal">${rows}</ul></div>`;
+        return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}</h2><p class="muted">${escapeHtml(tx.datePosted.slice(0, 10))}</p><ul class="journal">${rows}</ul></div>`;
       })
       .join("");
     return c.html(
@@ -1804,7 +1734,8 @@ ${items || `<p class="muted">No transactions yet.</p>`}${txs.length > 200 ? `<p 
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
-    const options = this.visibleAccountRows(c.get("bookId"))
+    const visible = await this.visibleAccountRows(c.get("bookId"));
+    const options = visible
       .filter((row) => !row.placeholder && !row.hidden)
       .map(
         (row) =>
@@ -1852,7 +1783,8 @@ ${rows}
     const date = formValue(body, "date");
     const description = formValue(body, "description");
     const bookId = c.get("bookId");
-    const accounts = new Set(this.visibleAccountRows(bookId).map((row) => row.guid));
+    const visibleRows = await this.visibleAccountRows(bookId);
+    const accounts = new Set(visibleRows.map((row) => row.guid));
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return this.newTransactionPage(c, "Enter a valid date.");
     }
@@ -1890,26 +1822,26 @@ ${rows}
       return this.newTransactionPage(c, "The splits must sum to zero.");
     }
 
-    const txGuid = newGuid();
-    this.sql.exec(
-      "INSERT INTO transactions (guid, book_id, currency_guid, post_date, description, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
-      txGuid,
-      bookId,
-      date,
-      description,
-      nowIso(),
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    document.postTransaction(
+      {
+        currency: { space: "CURRENCY", id: currency },
+        datePosted: `${date} 00:00:00 +0000`,
+        dateEntered: `${date} 00:00:00 +0000`,
+        description,
+        splits: splits.map((split) => ({
+          accountGuid: split.account,
+          value: split.value,
+        })),
+      },
+      {
+        transaction: newGuid(),
+        splits: splits.map(() => newGuid()),
+      },
     );
-    for (const split of splits) {
-      this.sql.exec(
-        "INSERT INTO splits (guid, book_id, tx_guid, account_guid, value_num, value_denom) VALUES (?, ?, ?, ?, ?, ?)",
-        newGuid(),
-        bookId,
-        txGuid,
-        split.account,
-        split.value.num.toString(),
-        split.value.denom.toString(),
-      );
-    }
+    await this.store.save(bookId, document, nowIso());
     return c.redirect("/app/journal");
   }
 
@@ -1917,6 +1849,7 @@ ${rows}
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const parentOptions = await this.accountOptions(c.get("bookId"));
     return c.html(
       this.appPage(
         "Add account",
@@ -1928,7 +1861,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <label for="type">Type</label>
 <select id="type" name="type">${ACCOUNT_TYPES.map((type) => `<option value="${type}">${type}</option>`).join("")}</select>
 <label for="parent">Parent</label>
-<select id="parent" name="parent">${this.accountOptions(c.get("bookId"))}</select>
+<select id="parent" name="parent">${parentOptions}</select>
 <button type="submit">Add account</button>
 </form>
 <p><a href="/app/accounts">Cancel</a></p>`,
@@ -1950,21 +1883,23 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     if (!name || name.length > 200 || !ACCOUNT_TYPES.includes(type as AccountType)) {
       return this.newAccountPage(c, "Enter a name and choose a valid account type.");
     }
-    if (parent && !this.visibleAccountRows(bookId).some((row) => row.guid === parent)) {
+    const visible = await this.visibleAccountRows(bookId);
+    if (parent && !visible.some((row) => row.guid === parent)) {
       return this.newAccountPage(c, "The selected parent no longer exists.");
     }
-    this.sql.exec(
-      `INSERT INTO accounts
-       (guid, book_id, name, account_type, commodity_guid, parent_guid, code,
-        description, hidden, placeholder, created_at)
-       VALUES (?, ?, ?, ?, NULL, ?, NULL, NULL, 0, 0, ?)`,
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    document.createAccount(
+      {
+        name,
+        type,
+        parentGuid: parent || null,
+        commodity: { space: "CURRENCY", id: currency },
+      },
       newGuid(),
-      bookId,
-      name,
-      type,
-      parent || null,
-      nowIso(),
     );
+    await this.store.save(bookId, document, nowIso());
     return c.redirect("/app/accounts");
   }
 
@@ -2053,7 +1988,7 @@ ${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join
       currency,
       nowIso(),
     );
-    this.seedAccounts(templateById(template), id);
+    await this.seedAccounts(templateById(template), id);
     const secure = new URL(c.req.url).protocol === "https:";
     c.header("Set-Cookie", bookCookie(id, secure));
     return c.redirect("/app/accounts");
@@ -2097,6 +2032,7 @@ ${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join
     if (this.bookCount() <= 1) {
       return c.text("Keep at least one company.", 409);
     }
+    await this.store.delete(id);
     deleteBook(this.sql, id);
     if (c.get("bookId") === id) {
       const secure = new URL(c.req.url).protocol === "https:";

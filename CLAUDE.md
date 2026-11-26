@@ -37,16 +37,27 @@ relevant plan.
 
 - **Runtime:** Cloudflare Workers (workerd), Workers Paid plan, TypeScript.
 - **Web:** Hono router, Hono JSX, htmx, mobile-first CSS; installable PWA.
-- **Data (migrating — see `docs/architecture/TECHNICAL-DESIGN.md`):** the
-  target is GnuCash XML as the sole canonical book, stored as a gzip'd
-  document in R2 (`tenants/<id>/<sha256>.gnucash.gz`) with no Durable Object
-  accounting store. Until that migration lands, the running system still
-  uses one `Book` Durable Object per tenant (`idFromName(tenantId)`) with
-  Drizzle ORM over the object's SQLite (`durable-sqlite`), GnuCash 5.x tables
-  plus `gcw_` tables for users, sessions, leases, inbox and audit. Do not add
-  new accounting features to the Drizzle/SQLite model; new work should move
-  toward the XML-canonical design.
-- **Storage:** R2 for snapshots and attachments; KV for hostname → tenant.
+- **Data:** GnuCash XML is the sole canonical book (`GncXmlDocument`, via
+  `BookXmlStore`). There is no Durable Object accounting store: the `Book`
+  DO (`idFromName(tenantId)`) keeps only `gcw_` tables (users, sessions,
+  TOTP credentials, staged bank-import batches) in its own SQLite; every
+  account/transaction/split lives in R2 as an **encrypted, versioned**
+  object per book (`tenants/<tenantId>/books/<bookId>/<timestamp>-<nonce>.gnucash.gz.enc`,
+  AES-256-GCM, key derived from `MASTER_KEY` + tenant). Opening a book
+  downloads and decrypts its latest version into the DO's in-memory working
+  copy (cached for the DO's lifetime); every save re-encrypts and writes a
+  _new_ version rather than overwriting, pruned to the most recent 30 so
+  earlier versions stay available as rollback backups. There is currently no
+  separate "unsaved draft" state: every mutation (`createAccount`, `post`,
+  etc.) saves immediately, which is the de facto always-on auto-save.
+- **Storage:** R2 for encrypted book versions, snapshots and attachments; KV
+  for hostname → tenant. EU data residency is Cloudflare R2's native
+  "Jurisdictional Restrictions" (`eu` jurisdiction, fixed at bucket
+  creation) — not a separate provider; see `docs/plans/P0.md` risks for why
+  Proton isn't used (no third-party storage API, and its ToS bars this use
+  case). A real S3-compatible EU/Swiss provider (Exoscale, Infomaniak) could
+  be added later behind the same `R2BucketLike`-shaped interface if a tenant
+  needs non-Cloudflare EU storage specifically.
 - **Converter:** Cloudflare Container running `python3-gnucash` for XML ↔ SQLite
   and the real-GnuCash oracle. Never linked into the app. This import/export
   boundary already matches the target architecture — keep it as-is.
