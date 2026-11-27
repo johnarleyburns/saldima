@@ -53,6 +53,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@saldima/crypto':
+        specifier: workspace:*
+        version: link:../../packages/crypto
       '@saldima/gnucash':
         specifier: workspace:*
         version: link:../../packages/gnucash

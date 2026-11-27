@@ -88,6 +88,7 @@ import {
   templateLabel,
 } from "./templates.ts";
 import { epochMs, isoAfterSeconds, nowIso } from "./time/system-clock.ts";
+import { VaultStore } from "./vault-store.ts";
 
 /** GnuCash shows "Bank", not "BANK"; keep the wire format uppercase. */
 function typeLabel(type: string): string {
@@ -259,6 +260,7 @@ export class Book {
   private readonly app: BookApp;
   private readonly store: BookXmlStore;
   private readonly receipts: ReceiptStore;
+  private readonly vault: VaultStore;
 
   constructor(
     private readonly state: DurableObjectStateLike,
@@ -275,6 +277,7 @@ export class Book {
       this.state.id.toString(),
       this.env.MASTER_KEY ?? "",
     );
+    this.vault = new VaultStore(this.env.R2, this.state.id.toString());
     this.app = this.buildApp();
   }
 
@@ -465,6 +468,11 @@ export class Book {
       this.cancelTransactionImport(c),
     );
     app.get("/app/reports", (c) => this.reportsPage(c));
+    app.get("/app/vault/setup", (c) => this.vaultSetupPage(c));
+    app.get("/app/vault/keys", (c) => this.vaultGetKeys(c));
+    app.put("/app/vault/keys", (c) => this.vaultPutKeys(c));
+    app.get("/app/vault/snapshots/:id", (c) => this.vaultGetSnapshot(c));
+    app.put("/app/vault/snapshots/:id", (c) => this.vaultPutSnapshot(c));
     app.get("/app/vault/bundle-check", (c) => this.vaultBundleCheckPage(c));
     app.get("/app/help", (c) => this.helpPage(c));
     app.get("/app/journal", (c) => this.journalPage(c));
@@ -2296,7 +2304,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       title,
       `<header class="appbar">
 <a class="brand" href="/app/books">Saldima</a>
-<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/vault/setup">Vault</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
@@ -2457,12 +2465,88 @@ ${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join
   }
 
   /**
+   * Zero-knowledge vault, Milestone 1 (issue #88): the page itself is
+   * just a mount point (`#vault-app`) -- `apps/web/src/client/vault.ts`
+   * builds the actual setup/backup/verify UI and does every crypto
+   * operation in the browser. This handler never sees a passphrase, a
+   * recovery code, or a key.
+   */
+  private async vaultSetupPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    return c.html(
+      this.appPage(
+        "Vault",
+        `<h1>Zero-knowledge vault</h1>
+<p class="muted">Encrypts a backup of this book entirely in your browser. Saldima never sees your passphrase, your key, or your recovery code. If you lose both your passphrase and your recovery code, this backup cannot be recovered -- by design.</p>
+<div id="vault-app" data-book-id="${escapeHtml(bookId)}">Loading…</div>
+<script type="module" src="/vault.js"></script>`,
+      ),
+      200,
+    );
+  }
+
+  /**
+   * Opaque storage for the wrapped-DEK key envelope -- never read or
+   * written by anything but the client bundle. See `vault-store.ts`.
+   */
+  private async vaultGetKeys(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (session?.totp_verified !== 1) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const json = await this.vault.loadKeyEnvelope(c.get("bookId"));
+    if (!json) return c.json({ error: "not_found" }, 404);
+    return c.text(json, 200, { "content-type": "application/json" });
+  }
+
+  private async vaultPutKeys(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (session?.totp_verified !== 1) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    await this.vault.saveKeyEnvelope(c.get("bookId"), new TextDecoder().decode(bytes));
+    return c.json({ ok: true });
+  }
+
+  /** Opaque storage for one encrypted book snapshot. See `vault-store.ts`. */
+  private async vaultGetSnapshot(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (session?.totp_verified !== 1) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const bytes = await this.vault.loadSnapshot(
+      c.get("bookId"),
+      c.req.param("id") ?? "",
+    );
+    if (!bytes) return c.json({ error: "not_found" }, 404);
+    const copy = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(copy).set(bytes);
+    return new Response(copy, {
+      headers: { "content-type": "application/octet-stream" },
+    });
+  }
+
+  private async vaultPutSnapshot(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (session?.totp_verified !== 1) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    await this.vault.saveSnapshot(c.get("bookId"), c.req.param("id") ?? "", bytes);
+    return c.json({ ok: true });
+  }
+
+  /**
    * Plumbing-only check that the first-ever client-side JS bundle in this
    * repo (`apps/web/src/client/vault.ts`, built by `pnpm build:client` into
    * `apps/web/static/vault.js` and served by Workers Assets) actually
-   * loads and runs in a real browser. No vault logic lives here yet --
-   * see issue #88 for the real setup/encrypt/decrypt flow that replaces
-   * this page.
+   * loads and runs in a real browser. Kept alongside the real vault page
+   * above as a minimal smoke check of the bundle/static-serving plumbing
+   * itself (issue #88, Workstream 2).
    */
   private async vaultBundleCheckPage(c: BookContext): Promise<Response> {
     const session = await this.currentSession(c);
