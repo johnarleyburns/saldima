@@ -478,6 +478,8 @@ export class Book {
     app.get("/app/journal", (c) => this.journalPage(c));
     app.get("/app/journal/new", (c) => this.newTransactionPage(c));
     app.post("/app/journal", (c) => this.createTransaction(c));
+    app.post("/app/journal/:guid/void", (c) => this.voidTransactionRoute(c));
+    app.post("/app/journal/:guid/unvoid", (c) => this.unvoidTransactionRoute(c));
     app.get("/app/security/totp", (c) => this.totpPage(c));
     app.post("/app/security/totp", (c) => this.totp(c));
     return app;
@@ -2106,7 +2108,15 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
               `<li><span>${escapeHtml(accounts.get(split.accountGuid) ?? "?")}</span><span class="amount">${formatMoney(split.value, 100n)}</span></li>`,
           )
           .join("");
-        return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}</h2><p class="muted">${escapeHtml(tx.datePosted.slice(0, 10))}</p><ul class="journal">${rows}</ul></div>`;
+        const voidControls = tx.voided
+          ? `<p class="muted">Voided: ${escapeHtml(tx.voidReason ?? "")} (${escapeHtml(tx.voidTime?.slice(0, 10) ?? "")})</p>
+<form method="post" action="/app/journal/${escapeHtml(tx.guid)}/unvoid"><button type="submit" class="secondary">Unvoid</button></form>`
+          : `<form method="post" action="/app/journal/${escapeHtml(tx.guid)}/void">
+<label for="void-reason-${escapeHtml(tx.guid)}">Void reason</label>
+<input id="void-reason-${escapeHtml(tx.guid)}" name="reason" type="text" required maxlength="200">
+<button type="submit" class="secondary">Void</button>
+</form>`;
+        return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}${tx.voided ? ` <span class="chip">VOID</span>` : ""}</h2><p class="muted">${escapeHtml(tx.datePosted.slice(0, 10))}</p><ul class="journal">${rows}</ul>${voidControls}</div>`;
       })
       .join("");
     return c.html(
@@ -2238,6 +2248,53 @@ ${rows}
       },
     );
     await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/journal");
+  }
+
+  /**
+   * Voids a transaction (GnuCash's "Void Transaction", not a delete): the
+   * original splits are preserved for audit but zeroed, so the
+   * transaction stops affecting any balance. Silently no-ops on an
+   * unknown transaction, a blank reason, or a transaction that's already
+   * voided -- the journal page's own markup already prevents all three
+   * from the UI, so this is just a safety net, not a place for elaborate
+   * error reporting.
+   */
+  private async voidTransactionRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (document) {
+      const body = await c.req.parseBody();
+      const reason = formValue(body, "reason");
+      try {
+        document.voidTransaction(c.req.param("guid") ?? "", reason, nowIso());
+        await this.store.save(bookId, document, nowIso());
+      } catch {
+        // Unknown transaction, blank reason, or already voided -- nothing to do.
+      }
+    }
+    return c.redirect("/app/journal");
+  }
+
+  private async unvoidTransactionRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (document) {
+      try {
+        document.unvoidTransaction(c.req.param("guid") ?? "");
+        await this.store.save(bookId, document, nowIso());
+      } catch {
+        // Unknown transaction, or it isn't voided -- nothing to do.
+      }
+    }
     return c.redirect("/app/journal");
   }
 

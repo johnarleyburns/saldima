@@ -245,6 +245,162 @@ describe("GncXmlDocument", () => {
     );
   });
 
+  it("voids a transaction, zeroing its effect on balances without deleting it, then unvoids it", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-02-01 00:00:00 +0000",
+        dateEntered: "2026-02-01 00:00:00 +0000",
+        description: "Coffee",
+        splits: [
+          { accountGuid: BANK, value: money(-500n, 100n), memo: "beans" },
+          { accountGuid: SALARY, value: money(500n, 100n) },
+        ],
+      },
+      { transaction: txId, splits: splitIds },
+    );
+    doc.setSplitReconcileState(txId, splitIds[0] ?? "", "c");
+
+    doc.voidTransaction(txId, "Entered in error", "2026-02-10 00:00:00 +0000");
+    const voided = doc.transaction(txId);
+    expect(voided).toMatchObject({
+      voided: true,
+      voidReason: "Entered in error",
+      voidTime: "2026-02-10 00:00:00 +0000",
+    });
+    // Zeroed, so it no longer affects any balance -- but the original
+    // amounts and the memo survive for audit, and the split is flagged "v".
+    expect(voided?.splits[0]).toMatchObject({
+      memo: "beans",
+      reconcileState: "v",
+      value: money(0n, 100n),
+      quantity: money(0n, 100n),
+      voidFormerValue: money(-500n, 100n),
+      voidFormerQuantity: money(-500n, 100n),
+    });
+
+    const reparsed = GncXmlDocument.parse(doc.serialize());
+    const reparsedVoided = reparsed.transaction(txId);
+    expect(reparsedVoided?.voided).toBe(true);
+    expect(reparsedVoided?.splits[0]?.value).toEqual(money(0n, 100n));
+
+    doc.unvoidTransaction(txId);
+    const unvoided = doc.transaction(txId);
+    expect(unvoided).toMatchObject({ voided: false, voidReason: null, voidTime: null });
+    expect(unvoided?.splits[0]).toMatchObject({
+      reconcileState: "n",
+      value: money(-500n, 100n),
+      quantity: money(-500n, 100n),
+      voidFormerValue: null,
+      voidFormerQuantity: null,
+    });
+  });
+
+  it("refuses to void an already-voided transaction, to void or unvoid an unknown one, or to void with a blank reason", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-02-01 00:00:00 +0000",
+        dateEntered: "2026-02-01 00:00:00 +0000",
+        description: "Coffee",
+        splits: [
+          { accountGuid: BANK, value: money(-500n, 100n) },
+          { accountGuid: SALARY, value: money(500n, 100n) },
+        ],
+      },
+      { transaction: txId, splits: splitIds },
+    );
+
+    expect(() => doc.voidTransaction(txId, "  ", "2026-02-10 00:00:00 +0000")).toThrow(
+      GncXmlError,
+    );
+    expect(() =>
+      doc.voidTransaction(guidFrom("f".repeat(32)), "x", "2026-02-10 00:00:00 +0000"),
+    ).toThrow(GncXmlError);
+    expect(() => doc.unvoidTransaction(txId)).toThrow(GncXmlError);
+
+    doc.voidTransaction(txId, "Entered in error", "2026-02-10 00:00:00 +0000");
+    expect(() =>
+      doc.voidTransaction(txId, "Again", "2026-02-11 00:00:00 +0000"),
+    ).toThrow(GncXmlError);
+    expect(() => doc.unvoidTransaction(guidFrom("f".repeat(32)))).toThrow(GncXmlError);
+  });
+
+  it("does not invent a notes slot when voiding/unvoiding a transaction that never had one", async () => {
+    const doc = GncXmlDocument.parse(await loadFixtureXml());
+    const txId = guidFrom("2".repeat(32));
+    const splitIds = [guidFrom("3".repeat(32)), guidFrom("4".repeat(32))];
+    doc.postTransaction(
+      {
+        currency: USD,
+        datePosted: "2026-02-01 00:00:00 +0000",
+        dateEntered: "2026-02-01 00:00:00 +0000",
+        description: "Coffee",
+        splits: [
+          { accountGuid: BANK, value: money(-500n, 100n) },
+          { accountGuid: SALARY, value: money(500n, 100n) },
+        ],
+      },
+      { transaction: txId, splits: splitIds },
+    );
+    doc.voidTransaction(txId, "Entered in error", "2026-02-10 00:00:00 +0000");
+    expect(doc.serialize()).toContain('<slot:value type="string">Voided transaction');
+    doc.unvoidTransaction(txId);
+    expect(doc.serialize()).not.toContain("void-former-notes");
+  });
+
+  it("moves a pre-existing notes value to void-former-notes, then restores it on unvoid", () => {
+    const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:book="http://www.gnucash.org/XML/book" xmlns:trn="http://www.gnucash.org/XML/trn" xmlns:split="http://www.gnucash.org/XML/split" xmlns:slot="http://www.gnucash.org/XML/slot" xmlns:ts="http://www.gnucash.org/XML/ts">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"d".repeat(32)}</book:id>
+<gnc:transaction version="2.0.0">
+  <trn:id type="guid">${"e".repeat(32)}</trn:id>
+  <trn:description>Imported from desktop</trn:description>
+  <trn:slots>
+    <slot>
+      <slot:key>notes</slot:key>
+      <slot:value type="string">Called the vendor about this one</slot:value>
+    </slot>
+  </trn:slots>
+  <trn:splits>
+    <trn:split>
+      <split:id type="guid">${"f0".repeat(16)}</split:id>
+      <split:value>-500/100</split:value>
+      <split:account type="guid">${"f1".repeat(16)}</split:account>
+    </trn:split>
+    <trn:split>
+      <split:id type="guid">${"f2".repeat(16)}</split:id>
+      <split:value>500/100</split:value>
+      <split:account type="guid">${"f3".repeat(16)}</split:account>
+    </trn:split>
+  </trn:splits>
+</gnc:transaction>
+</gnc:book>
+</gnc-v2>`);
+    const txId = "e".repeat(32);
+
+    doc.voidTransaction(txId, "Entered in error", "2026-02-10 00:00:00 +0000");
+    const serializedVoided = doc.serialize();
+    expect(serializedVoided).toContain(
+      '<slot:value type="string">Called the vendor about this one</slot:value>',
+    );
+    expect(serializedVoided).toContain('<slot:value type="string">Voided transaction');
+
+    doc.unvoidTransaction(txId);
+    const serializedUnvoided = doc.serialize();
+    expect(serializedUnvoided).not.toContain("void-former-notes");
+    expect(serializedUnvoided).toContain(
+      '<slot:value type="string">Called the vendor about this one</slot:value>',
+    );
+  });
+
   it("creates a customer, an invoice with lines, and posts it as a real transaction", async () => {
     const doc = GncXmlDocument.parse(await loadFixtureXml());
     const customerGuid = guidFrom("c".repeat(32));
