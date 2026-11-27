@@ -16,10 +16,13 @@
 // first:
 //   curl -sL -o /tmp/gronewald/journal_entries_4203.csv \
 //     'https://zenodo.org/records/22014653/files/journal_entries_4203.csv?download=1'
-//   tsx scripts/import-gronewald-fixture.ts /tmp/gronewald/journal_entries_4203.csv [YYYY-MM]
+//   tsx scripts/import-gronewald-fixture.ts /tmp/gronewald/journal_entries_4203.csv [YYYY-MM|full]
 //
-// YYYY-MM defaults to 2023-01 (the original fixture). The full dataset
-// covers 2023-01..2024-12.
+// YYYY-MM defaults to 2023-01 (the original fixture) and builds one
+// standalone month. Passing `full` instead builds a single continuous
+// book spanning the entire dataset (2023-01 through 2024-12) -- for
+// year-over-year comparison within one book, rather than disconnected
+// month snapshots.
 
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -169,23 +172,28 @@ function buildSnapshot(rows: readonly GlRow[], month: string): BookSnapshot {
 }
 
 const MONTH_RE = /^\d{4}-\d{2}$/;
+const FULL = "full";
 
 function main(): void {
   const csvPath = process.argv[2];
   const month = process.argv[3] ?? "2023-01";
   if (!csvPath) {
     console.error(
-      "usage: tsx scripts/import-gronewald-fixture.ts <path-to-journal_entries_4203.csv> [YYYY-MM]",
+      "usage: tsx scripts/import-gronewald-fixture.ts <path-to-journal_entries_4203.csv> [YYYY-MM|full]",
     );
     process.exit(1);
   }
-  if (!MONTH_RE.test(month)) {
-    throw new Error(`month must be YYYY-MM, got ${JSON.stringify(month)}`);
+  if (month !== FULL && !MONTH_RE.test(month)) {
+    throw new Error(`month must be YYYY-MM or "full", got ${JSON.stringify(month)}`);
   }
   const output = join(ROOT, "fixtures", "books", `gronewald-gl-${month}.gnucash`);
 
   const text = readFileSync(csvPath, "utf8");
-  const rows = parseCsv(text).filter((row) => row.document_date.startsWith(month));
+  const allRows = parseCsv(text);
+  const rows =
+    month === FULL
+      ? allRows
+      : allRows.filter((row) => row.document_date.startsWith(month));
   if (rows.length === 0)
     throw new Error(
       `no rows found for ${month}; is this the right CSV, or an out-of-range month?`,

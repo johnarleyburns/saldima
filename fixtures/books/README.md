@@ -74,25 +74,41 @@ fixtures.
 Built by `scripts/import-gronewald-fixture.ts` from the source CSV
 (`journal_entries_4203.csv`, 31 MB, not committed -- see the script's own
 header comment for the download command) via `tsx
-scripts/import-gronewald-fixture.ts <csv-path> [YYYY-MM]` (`YYYY-MM`
-defaults to `2023-01`). Each file is one calendar month's postings,
-standalone -- not a cumulative, opening-balance-linked series across
-months (matching `e2e/gronewald-fixture.spec.ts`'s own treatment: each
-import lands in a fresh company). The script proves its own output
-re-parses to the same shape before writing it, and -- new as of this
-addition -- every file here was also actually opened and re-saved by the
-real GnuCash engine (`python3-gnucash`) as an external oracle, with zero
-errors, the same bar `oracle-mini.*` and `fa-001-*` above already meet.
+scripts/import-gronewald-fixture.ts <csv-path> [YYYY-MM|full]` (`YYYY-MM`
+defaults to `2023-01`; `full` builds one continuous book spanning the
+whole dataset instead). A `YYYY-MM` file is one calendar month's
+postings, standalone -- not a cumulative, opening-balance-linked series
+across months (matching `e2e/gronewald-fixture.spec.ts`'s own treatment:
+each import lands in a fresh company); `gronewald-gl-full.gnucash` is the
+opposite of that deliberately -- every posting across both years in one
+book, for year-over-year comparison (e.g. total revenue 2023 vs 2024)
+that a standalone month can't give you. The script proves its own output
+re-parses to the same shape before writing it, and every file here was
+also actually opened and re-saved by the real GnuCash engine
+(`python3-gnucash`) as an external oracle, with zero errors, the same bar
+`oracle-mini.*` and `fa-001-*` above already meet.
 
-| File                           | Month   | Accounts | Transactions | SHA-256                                                            |
-| ------------------------------ | ------- | -------: | -----------: | ------------------------------------------------------------------ |
-| `gronewald-gl-2023-01.gnucash` | 2023-01 |       22 |        3,305 | `d22e60590536ed28410d8199f69a19f050ab6ff4d507140fd89e407222770a0b` |
-| `gronewald-gl-2023-07.gnucash` | 2023-07 |       21 |        5,620 | `59561e1347319086537d93fbca5d0d423cbca7d81d110d35844e5ea58a27c1a0` |
-| `gronewald-gl-2024-12.gnucash` | 2024-12 |       21 |        2,429 | `df1cef1fa55083014ba01c8840ef4aa13a6e7a9a8b69cc9756d1dcdb21fe1011` |
+| File                           | Coverage         | Accounts | Transactions |                                                            SHA-256 |
+| ------------------------------ | ---------------- | -------: | -----------: | -----------------------------------------------------------------: |
+| `gronewald-gl-2023-01.gnucash` | 2023-01          |       22 |        3,305 | `d22e60590536ed28410d8199f69a19f050ab6ff4d507140fd89e407222770a0b` |
+| `gronewald-gl-2023-07.gnucash` | 2023-07          |       21 |        5,620 | `59561e1347319086537d93fbca5d0d423cbca7d81d110d35844e5ea58a27c1a0` |
+| `gronewald-gl-2024-12.gnucash` | 2024-12          |       21 |        2,429 | `df1cef1fa55083014ba01c8840ef4aa13a6e7a9a8b69cc9756d1dcdb21fe1011` |
+| `gronewald-gl-full.gnucash`    | 2023-01..2024-12 |       25 |      102,429 | `89990d28bcf623307ea87a6dded20161c406ac3a7174a836705c9feedca5cc85` |
 
-Three non-adjacent months (first, a mid-year month of the same year, and
-the dataset's final month) were picked deliberately for temporal spread
-rather than three consecutive months, while keeping the number of
-committed files small. The full 24-month range (2023-01..2024-12) is
-available by re-running the script against the source CSV with a
-different `YYYY-MM` if a specific month is ever needed for a test.
+The three `YYYY-MM` months were picked non-adjacent (first, a mid-year
+month of the same year, and the dataset's final month) for temporal
+spread while keeping committed file count small; `gronewald-gl-full.gnucash`
+supersedes that for anything needing the complete picture (it's the
+entire 256,232-row dataset, so every one of the three months above is a
+strict subset of it -- kept separately anyway since the standalone-month
+shape and the continuous-book shape genuinely test different things). Any
+other single month in the 2023-01..2024-12 range is still available by
+re-running the script with that `YYYY-MM` directly against the source
+CSV.
+
+**Note:** `gronewald-gl-full.gnucash` is a single ~10 MB file (~119 MB
+decompressed) and took GnuCash itself about 2.5 minutes to open, verify,
+and re-save during oracle validation -- noticeably slower than the small
+fixtures above. Prefer a single `YYYY-MM` month for a fast unit/e2e test
+and reach for `full` specifically when the test needs more than one
+month's data.
