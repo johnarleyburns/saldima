@@ -7,9 +7,8 @@
  * one-shot import/export), this keeps the original parsed element tree and
  * mutates it in place: known objects (accounts, transactions, splits) are
  * read from and written back to their own nodes, and anything this engine
- * does not model (other commodities, prices, lots, unrelated slots) is
- * never touched, so it survives a parse/edit/serialize round trip
- * untouched.
+ * does not model (lots, unrelated slots) is never touched, so it
+ * survives a parse/edit/serialize round trip untouched.
  */
 
 import {
@@ -29,10 +28,12 @@ import {
   equalsMoney,
   formatMoney,
   type Money,
+  multiplyMoney,
   negateMoney,
 } from "./money.ts";
 import {
   addDays,
+  daysBetween,
   nextInstance,
   type PeriodType,
   type Recurrence,
@@ -223,6 +224,39 @@ export interface UpdateBudgetInput {
 export interface BudgetPeriodRange {
   readonly start: string;
   readonly end: string;
+}
+
+/**
+ * A GnuCash `GNCPrice`: one entry in the book's price database, recording
+ * `value` units of `currency` per unit of `commodity` as of `time`.
+ * Milestone 1 (issue tracked in the repo): every price this engine
+ * creates has `source: "user:price-editor"` -- no online quote fetching.
+ */
+export interface XmlPrice {
+  readonly guid: string;
+  readonly commodity: CommodityRef;
+  readonly currency: CommodityRef;
+  /** `YYYY-MM-DD HH:MM:SS +ZZZZ`, as GnuCash stores it. */
+  readonly time: string;
+  readonly source: string;
+  /** Free text on the wire (desktop writes `last`/`bid`/`ask`/`nav`/etc.); `""` if unset. */
+  readonly type: string;
+  readonly value: Money;
+}
+
+export interface CreatePriceInput {
+  readonly commodity: CommodityRef;
+  readonly currency: CommodityRef;
+  readonly time: string;
+  readonly type?: string;
+  readonly value: Money;
+}
+
+export interface UpdatePriceInput {
+  readonly time?: string;
+  /** `""` removes it. */
+  readonly type?: string;
+  readonly value?: Money;
 }
 
 /** A GnuCash `GncCustomer` business object: a billing contact for invoices. */
@@ -772,6 +806,7 @@ export class GncXmlDocument {
   private readonly vendorNodes = new Map<string, XmlNode>();
   private readonly scheduledTransactionNodes = new Map<string, XmlNode>();
   private readonly budgetNodes = new Map<string, XmlNode>();
+  private readonly priceNodes = new Map<string, XmlNode>();
 
   private constructor(root: XmlNode, book: XmlNode) {
     this.root = root;
@@ -794,6 +829,7 @@ export class GncXmlDocument {
     this.vendorNodes.clear();
     this.scheduledTransactionNodes.clear();
     this.budgetNodes.clear();
+    this.priceNodes.clear();
     for (const accountNode of children(this.book, "account")) {
       const guid = decoded(first(accountNode, "id"));
       if (guid) this.accountNodes.set(guid, accountNode);
@@ -824,6 +860,13 @@ export class GncXmlDocument {
     for (const budgetNode of children(this.book, "budget")) {
       const guid = decoded(first(budgetNode, "id"));
       if (guid) this.budgetNodes.set(guid, budgetNode);
+    }
+    const pricedbNode = first(this.book, "pricedb");
+    if (pricedbNode) {
+      for (const priceNode of children(pricedbNode, "price")) {
+        const guid = decoded(first(priceNode, "id"));
+        if (guid) this.priceNodes.set(guid, priceNode);
+      }
     }
   }
 
@@ -1900,6 +1943,163 @@ export class GncXmlDocument {
       }
     }
     return total;
+  }
+
+  // MARK: price database
+
+  private findPricedbNode(): XmlNode | undefined {
+    return first(this.book, "pricedb");
+  }
+
+  /**
+   * `<gnc:pricedb>` sits right after the last commodity -- before any
+   * account/transaction. Falls back to right after `book:id` on the
+   * (unrealistic in practice, every real book declares a currency) case
+   * of a book with no commodities at all, rather than before it.
+   */
+  private findOrCreatePricedbNode(): XmlNode {
+    const existing = this.findPricedbNode();
+    if (existing) return existing;
+    const created = node("gnc:pricedb", { version: "1" }, []);
+    const anchor = children(this.book, "commodity").at(-1) ?? first(this.book, "id");
+    const index = anchor ? this.book.children.indexOf(anchor) + 1 : 0;
+    this.book.children.splice(index, 0, created);
+    return created;
+  }
+
+  createPrice(input: CreatePriceInput, guid: Guid): XmlPrice {
+    if (this.priceNodes.has(guid)) {
+      throw new GncXmlError(`duplicate price ${guid}`);
+    }
+    const pricedbNode = this.findOrCreatePricedbNode();
+    const priceChildren: XmlNode[] = [
+      guidNode("price:id", guid),
+      commodityNode("price:commodity", input.commodity),
+      commodityNode("price:currency", input.currency),
+      node("price:time", {}, [leaf("ts:date", input.time)]),
+      // Milestone 1: every price this engine creates is user-entered.
+      leaf("price:source", "user:price-editor"),
+    ];
+    if (input.type) priceChildren.push(leaf("price:type", input.type));
+    priceChildren.push(leaf("price:value", rationalText(input.value)));
+    const priceNode = node("price", {}, priceChildren);
+    pricedbNode.children.push(priceNode);
+    this.priceNodes.set(guid, priceNode);
+    return this.readPrice(priceNode);
+  }
+
+  prices(): XmlPrice[] {
+    return [...this.priceNodes.values()].map((priceNode) => this.readPrice(priceNode));
+  }
+
+  price(guid: string): XmlPrice | undefined {
+    const priceNode = this.priceNodes.get(guid);
+    return priceNode ? this.readPrice(priceNode) : undefined;
+  }
+
+  private readPrice(priceNode: XmlNode): XmlPrice {
+    const guid = decoded(first(priceNode, "id"));
+    const fallbackRef: CommodityRef = { space: "ISO4217", id: "USD" };
+    const commodity = readCommodityRef(priceNode, "commodity") ?? fallbackRef;
+    const currency = readCommodityRef(priceNode, "currency") ?? fallbackRef;
+    const time = nested(priceNode, "time", "date")
+      ? decoded(nested(priceNode, "time", "date"))
+      : "";
+    const sourceNode = first(priceNode, "source");
+    const typeNode = first(priceNode, "type");
+    const valueNode = first(priceNode, "value");
+    return {
+      guid,
+      commodity,
+      currency,
+      time,
+      source: sourceNode ? decoded(sourceNode) : "",
+      type: typeNode ? decoded(typeNode) : "",
+      value: valueNode ? rational(text(valueNode)) : { num: 0n, denom: 1n },
+    };
+  }
+
+  updatePrice(guid: string, patch: UpdatePriceInput): XmlPrice {
+    const priceNode = this.priceNodes.get(guid);
+    if (!priceNode) throw new GncXmlError(`unknown price ${guid}`);
+    if (patch.time !== undefined) {
+      const timeWrapper = first(priceNode, "time");
+      if (timeWrapper) setLeafText(timeWrapper, "ts:date", patch.time);
+    }
+    if (patch.type !== undefined) {
+      const existingType = first(priceNode, "type");
+      if (existingType) {
+        if (patch.type === "") removeChild(priceNode, existingType);
+        else setLeafText(priceNode, "price:type", patch.type);
+      } else if (patch.type !== "") {
+        const valueNode = first(priceNode, "value");
+        const insertAt = valueNode
+          ? priceNode.children.indexOf(valueNode)
+          : priceNode.children.length;
+        priceNode.children.splice(insertAt, 0, leaf("price:type", patch.type));
+      }
+    }
+    if (patch.value !== undefined) {
+      setLeafText(priceNode, "price:value", rationalText(patch.value));
+    }
+    return this.readPrice(priceNode);
+  }
+
+  deletePrice(guid: string): void {
+    const priceNode = this.priceNodes.get(guid);
+    const pricedbNode = this.findPricedbNode();
+    if (!priceNode || !pricedbNode) return;
+    removeChild(pricedbNode, priceNode);
+    this.priceNodes.delete(guid);
+    // Real GnuCash omits <gnc:pricedb> entirely once it holds no prices.
+    if (pricedbNode.children.length === 0) removeChild(this.book, pricedbNode);
+  }
+
+  /**
+   * The price for `commodity`/`currency` closest in time to `asOf`
+   * (desktop GnuCash's `gnc_pricedb_lookup_nearest_in_time`), or `null` if
+   * none exists for that exact pair. Milestone 1: directional only -- no
+   * reciprocal-pair fallback.
+   */
+  nearestPrice(
+    commodity: CommodityRef,
+    currency: CommodityRef,
+    asOf: string,
+  ): XmlPrice | null {
+    const candidates = this.prices().filter(
+      (candidate) =>
+        candidate.commodity.space === commodity.space &&
+        candidate.commodity.id === commodity.id &&
+        candidate.currency.space === currency.space &&
+        candidate.currency.id === currency.id,
+    );
+    let best: XmlPrice | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const distance = daysBetween(candidate.time.slice(0, 10), asOf);
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Converts `value` (in `from`'s commodity) to `to`'s commodity using the
+   * nearest price as of `asOf`. `null` -- never a silent 1:1 guess -- when
+   * no price exists for the pair and the commodities aren't identical.
+   */
+  convertMoney(
+    value: Money,
+    from: CommodityRef,
+    to: CommodityRef,
+    asOf: string,
+  ): Money | null {
+    if (from.space === to.space && from.id === to.id) return value;
+    const price = this.nearestPrice(from, to, asOf);
+    if (!price) return null;
+    return multiplyMoney(value, price.value);
   }
 
   // MARK: customers

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { describe, expect, it } from "vitest";
-import { nextInstance, type Recurrence } from "./recurrence.ts";
+import { daysBetween, nextInstance, type Recurrence } from "./recurrence.ts";
 
 function recurrence(overrides: Partial<Recurrence> & { start: string }): Recurrence {
   return {
@@ -148,5 +148,20 @@ describe("nextInstance", () => {
   it("rejects a malformed date", () => {
     const r = recurrence({ periodType: "day", multiplier: 1, start: "not-a-date" });
     expect(() => nextInstance(r, "2026-01-01")).toThrow(RangeError);
+  });
+});
+
+describe("daysBetween", () => {
+  it("is order-independent", () => {
+    expect(daysBetween("2026-01-01", "2026-01-10")).toBe(9);
+    expect(daysBetween("2026-01-10", "2026-01-01")).toBe(9);
+  });
+
+  it("is zero for the same date", () => {
+    expect(daysBetween("2026-01-01", "2026-01-01")).toBe(0);
+  });
+
+  it("spans a year boundary correctly", () => {
+    expect(daysBetween("2025-12-28", "2026-01-04")).toBe(7);
   });
 });

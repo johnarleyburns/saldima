@@ -91,7 +91,7 @@ test("mobile: the nav bar stays collapsed behind a Menu toggle instead of pushin
 
   await toggle.click();
   await expect(navLinks.first()).toBeVisible();
-  await expect(page.locator(".nav-panel a", { hasText: "Budgets" })).toBeVisible();
+  await expect(page.locator(".nav-panel a", { hasText: "Prices" })).toBeVisible();
 });
 
 test("desktop: the nav bar shows inline with no Menu toggle", async ({
@@ -106,5 +106,5 @@ test("desktop: the nav bar shows inline with no Menu toggle", async ({
   await setUpOwnerAndSignIn(page, testInfo, book, email);
 
   await expect(page.locator(".nav-toggle-label")).toBeHidden();
-  await expect(page.locator(".nav-panel a", { hasText: "Budgets" })).toBeVisible();
+  await expect(page.locator(".nav-panel a", { hasText: "Prices" })).toBeVisible();
 });
