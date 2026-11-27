@@ -66,6 +66,9 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$SKIP_CHECKS" -eq 0 ]; then
     pnpm test:unit
 fi
 
+echo "==> Building client bundle"
+pnpm build:client
+
 echo "==> Building $TARGET configuration"
 if [ "$DRY_RUN" -eq 1 ]; then
     pnpm exec wrangler deploy --env "$TARGET" --dry-run

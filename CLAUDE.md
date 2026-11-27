@@ -37,6 +37,12 @@ relevant plan.
 
 - **Runtime:** Cloudflare Workers (workerd), Workers Paid plan, TypeScript.
 - **Web:** Hono router, Hono JSX, htmx, mobile-first CSS; installable PWA.
+  Server-rendered, with one deliberate exception: `apps/web/src/client/`
+  holds the zero-knowledge vault's client-side JS (see `docs/architecture/
+  TECHNICAL-DESIGN.md` §8), bundled by `pnpm build:client` into
+  `apps/web/static/` and served by Workers Assets (`wrangler.jsonc`'s
+  `assets` binding) — this exists so a passphrase-derived key and the
+  decrypted book data it unlocks never have to leave the browser.
 - **Data:** GnuCash XML is the sole canonical book (`GncXmlDocument`, via
   `BookXmlStore`). There is no Durable Object accounting store: the `Book`
   DO (`idFromName(tenantId)`) keeps only `gcw_` tables (users, sessions,
@@ -155,6 +161,7 @@ defers the full `worker/edge/book` split to P1. Boundary rules still apply:
 | `pnpm check:licenses`    | dependency license scan (GPL/AGPL/unknown fail)                                                                                                             |
 | `pnpm check:spdx`        | every tracked source file has an SPDX header                                                                                                                |
 | `pnpm accounting-bridge` | NDJSON stdin/stdout bridge over `packages/gnucash`'s pure ledger functions, for the external `saldima-accounting-verifier` harness to drive as a subprocess |
+| `pnpm build:client`      | bundles `apps/web/src/client/*.ts` into `apps/web/static/*.js` (Workers Assets); run automatically by `dev`/`e2e`/`deploy:*`                                |
 
 Never run a deploy command. `wrangler deploy` is owner-only and lives in
 protected GitHub Environments.
