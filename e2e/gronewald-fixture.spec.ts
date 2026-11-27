@@ -64,6 +64,13 @@ async function setUpOwner(
   return secret;
 }
 
+/** Nav links live behind a collapsed Menu toggle below the desktop breakpoint. */
+async function clickNavLink(page: Page, name: string): Promise<void> {
+  const toggle = page.locator(".nav-toggle-label");
+  if (await toggle.isVisible()) await toggle.click();
+  await page.getByRole("navigation").getByRole("link", { name }).click();
+}
+
 test("gronewald: bulk-imports a complex German SME ledger and the numbers tie out", async ({
   page,
 }, testInfo) => {
@@ -73,7 +80,7 @@ test("gronewald: bulk-imports a complex German SME ledger and the numbers tie ou
   // Import into its own company so the seeded default book is untouched.
   // Creating a company activates it immediately and lands on its Accounts
   // page, so no separate "Select" step is needed here.
-  await page.getByRole("navigation").getByRole("link", { name: "Books" }).click();
+  await clickNavLink(page, "Books");
   await page.getByLabel("Company name").fill("Gronewald GL Demo");
   await page.getByLabel("Chart of accounts").selectOption("personal");
   await page.getByRole("button", { name: "Create company" }).click();
@@ -92,13 +99,13 @@ test("gronewald: bulk-imports a complex German SME ledger and the numbers tie ou
   await expect(page.getByText("Trade payables")).toBeVisible();
   await expect(page.getByText("Revenue, 19%")).toBeVisible();
 
-  await page.getByRole("link", { name: "Reports" }).click();
+  await clickNavLink(page, "Reports");
   await expect(page.getByRole("heading", { name: "Trial balance" })).toBeVisible();
   // 3,305 balanced journal entries across 22 real GnuCash accounts must still
   // balance once rolled up into a trial balance by this app's own engine.
   await expect(page.getByText("Balanced")).toBeVisible();
 
-  await page.getByRole("link", { name: "Journal" }).click();
+  await clickNavLink(page, "Journal");
   await expect(
     page.getByText("Showing the most recent 200 of 3305 transactions."),
   ).toBeVisible();
@@ -109,9 +116,9 @@ test("journal: a simple two-leg payment posts through the UI", async ({
 }, testInfo) => {
   const email = `journal2-${testInfo.project.name}@example.test`;
   await setUpOwner(page, testInfo, "journal2", email);
-  await page.getByRole("link", { name: "Accounts" }).click();
+  await clickNavLink(page, "Accounts");
 
-  await page.getByRole("link", { name: "Journal" }).click();
+  await clickNavLink(page, "Journal");
   await page.getByRole("link", { name: "New transaction" }).click();
   await page.getByLabel("Description").fill("Coffee for the office");
   await page.locator("#split-account-0").selectOption({ label: "Checking" });
@@ -129,7 +136,7 @@ test("journal: a three-leg expense + tax + payable entry posts, and an unbalance
 }, testInfo) => {
   const email = `journal3-${testInfo.project.name}@example.test`;
   await setUpOwner(page, testInfo, "journal3", email);
-  await page.getByRole("navigation").getByRole("link", { name: "Books" }).click();
+  await clickNavLink(page, "Books");
   await page.getByLabel("Company name").fill("Multi-split demo");
   await page.getByLabel("Chart of accounts").selectOption("small-business");
   await page.getByRole("button", { name: "Create company" }).click();
@@ -157,6 +164,6 @@ test("journal: a three-leg expense + tax + payable entry posts, and an unbalance
   await page.getByRole("button", { name: "Post transaction" }).click();
   await expect(page.getByText("The splits must sum to zero.")).toBeVisible();
 
-  await page.getByRole("link", { name: "Journal" }).click();
+  await clickNavLink(page, "Journal");
   await expect(page.getByText("Should not post")).toHaveCount(0);
 });
