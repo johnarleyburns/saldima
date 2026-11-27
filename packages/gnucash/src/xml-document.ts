@@ -7,9 +7,9 @@
  * one-shot import/export), this keeps the original parsed element tree and
  * mutates it in place: known objects (accounts, transactions, splits) are
  * read from and written back to their own nodes, and anything this engine
- * does not model (other commodities, prices, lots, scheduled transactions,
- * budgets, business objects, unrelated slots) is never touched, so it
- * survives a parse/edit/serialize round trip untouched.
+ * does not model (other commodities, prices, lots, budgets, unrelated
+ * slots) is never touched, so it survives a parse/edit/serialize round
+ * trip untouched.
  */
 
 import {
@@ -24,7 +24,20 @@ import {
   type XmlNode,
 } from "./book-file.ts";
 import type { Guid } from "./guid.ts";
-import { addMoney, equalsMoney, type Money } from "./money.ts";
+import {
+  addMoney,
+  equalsMoney,
+  formatMoney,
+  type Money,
+  negateMoney,
+} from "./money.ts";
+import {
+  addDays,
+  nextInstance,
+  type PeriodType,
+  type Recurrence,
+  type WeekendAdjust,
+} from "./recurrence.ts";
 
 export class GncXmlError extends Error {
   constructor(message: string) {
@@ -92,6 +105,90 @@ export interface XmlTransaction {
   readonly voidReason: string | null;
   /** `YYYY-MM-DD HH:MM:SS +ZZZZ`, set only while voided. */
   readonly voidTime: string | null;
+}
+
+/** One leg of a scheduled transaction's template. Signed: positive debits, negative credits. */
+export interface XmlScheduledSplit {
+  readonly accountGuid: string;
+  readonly value: Money;
+}
+
+/**
+ * A GnuCash `GncSchedXaction` (desktop's "Scheduled Transactions"): a
+ * recurrence rule plus a template of splits that `postScheduledInstance`
+ * turns into a real transaction when due. Milestone 1 (issue tracked in
+ * the repo): fixed amounts only, no algebraic formulas; no deferred
+ * ("postpone") instances.
+ */
+export interface XmlScheduledTransaction {
+  readonly guid: string;
+  readonly name: string;
+  readonly description: string;
+  readonly currency: CommodityRef;
+  readonly enabled: boolean;
+  /** Silently post a due instance with no review. */
+  readonly autoCreate: boolean;
+  /** Only meaningful with `autoCreate`: still post silently, but flag it for review. */
+  readonly autoCreateNotify: boolean;
+  /** How many days before the due date an instance is created/posted. */
+  readonly advanceCreateDays: number;
+  /** How many further days before that an upcoming instance is shown as a reminder. */
+  readonly advanceRemindDays: number;
+  readonly start: string;
+  /** `YYYY-MM-DD`; `null` if no instance has posted yet. */
+  readonly lastOccurred: string | null;
+  readonly instanceCount: number;
+  /** Mutually exclusive end conditions, matching desktop GnuCash; `null` means it never ends. */
+  readonly end: { readonly occurrences: number } | { readonly date: string } | null;
+  readonly recurrence: Recurrence;
+  readonly templateAccountGuid: string;
+  readonly templateSplits: readonly XmlScheduledSplit[];
+}
+
+export interface CreateScheduledTransactionInput {
+  readonly name: string;
+  readonly description: string;
+  readonly currency: CommodityRef;
+  readonly enabled?: boolean;
+  readonly autoCreate?: boolean;
+  readonly autoCreateNotify?: boolean;
+  readonly advanceCreateDays?: number;
+  readonly advanceRemindDays?: number;
+  readonly start: string;
+  readonly end?: { readonly occurrences: number } | { readonly date: string };
+  readonly recurrence: Recurrence;
+  readonly templateSplits: readonly XmlScheduledSplit[];
+}
+
+export interface UpdateScheduledTransactionInput {
+  readonly name?: string;
+  readonly enabled?: boolean;
+  readonly autoCreate?: boolean;
+  readonly autoCreateNotify?: boolean;
+  readonly advanceCreateDays?: number;
+  readonly advanceRemindDays?: number;
+}
+
+export interface CreateScheduledTransactionIds {
+  readonly scheduledTransaction: Guid;
+  readonly templateAccount: Guid;
+  readonly templateTransaction: Guid;
+  readonly templateSplits: readonly Guid[];
+  /** Only used the first time ever -- the template root is shared across the whole book. */
+  readonly templateRoot?: Guid;
+}
+
+export type DueInstanceAction =
+  | "autoPost"
+  | "autoPostNotify"
+  | "needsApproval"
+  | "reminder";
+
+export interface DueScheduledInstance {
+  readonly scheduledTransactionGuid: string;
+  readonly name: string;
+  readonly date: string;
+  readonly action: DueInstanceAction;
 }
 
 /** A GnuCash `GncCustomer` business object: a billing contact for invoices. */
@@ -512,6 +609,74 @@ function readBooleanSlot(account: XmlNode, key: string): boolean {
 }
 
 /**
+ * Desktop GnuCash's own `recurrencePeriodTypeToString`/`FromString`
+ * (`libgnucash/engine/Recurrence.cpp`) -- note the spaces, not
+ * underscores, in three of these: verified against real GnuCash source.
+ */
+const PERIOD_TYPE_TO_XML: Record<PeriodType, string> = {
+  once: "once",
+  day: "day",
+  week: "week",
+  month: "month",
+  end_of_month: "end of month",
+  nth_weekday: "nth weekday",
+  last_weekday: "last weekday",
+  year: "year",
+};
+
+const PERIOD_TYPE_FROM_XML: ReadonlyMap<string, PeriodType> = new Map(
+  Object.entries(PERIOD_TYPE_TO_XML).map(([internal, xml]) => [
+    xml,
+    internal as PeriodType,
+  ]),
+);
+
+function gdateNode(tag: string, date: string): XmlNode {
+  return node(tag, {}, [leaf("gdate", date)]);
+}
+
+function readGdate(parent: XmlNode, tag: string): string | null {
+  const wrapper = first(parent, tag);
+  if (!wrapper) return null;
+  const inner = first(wrapper, "gdate");
+  return inner ? decoded(inner) : null;
+}
+
+/** A KVP frame value: `<slot:value type="frame">` wrapping its own nested `<slot>` entries. */
+function frameSlotValue(
+  entries: ReadonlyArray<{ key: string; type: string; text: string }>,
+): XmlNode {
+  return node(
+    "slot:value",
+    { type: "frame" },
+    entries.map((entry) =>
+      node("slot", {}, [
+        leaf("slot:key", entry.key),
+        leaf("slot:value", entry.text, { type: entry.type }),
+      ]),
+    ),
+  );
+}
+
+/** Reads a nested KVP frame slot (e.g. `sched-xaction`) as a flat key -> text map. */
+function readFrameSlotEntries(owner: XmlNode, frameKey: string): Map<string, string> {
+  const entries = new Map<string, string>();
+  const slots = first(owner, "slots");
+  if (!slots) return entries;
+  const frameSlot = children(slots, "slot").find(
+    (slot) => decoded(first(slot, "key")) === frameKey,
+  );
+  const frameValue = frameSlot ? first(frameSlot, "value") : undefined;
+  if (!frameValue) return entries;
+  for (const entry of children(frameValue, "slot")) {
+    const key = decoded(first(entry, "key"));
+    const valueNode = first(entry, "value");
+    if (key && valueNode) entries.set(key, decoded(valueNode));
+  }
+  return entries;
+}
+
+/**
  * A live, mutable GnuCash XML book. Known objects (accounts, transactions,
  * splits) are read from and written back to their own element in the parsed
  * tree; everything else in the document is left untouched.
@@ -524,6 +689,7 @@ export class GncXmlDocument {
   private readonly customerNodes = new Map<string, XmlNode>();
   private readonly invoiceNodes = new Map<string, XmlNode>();
   private readonly vendorNodes = new Map<string, XmlNode>();
+  private readonly scheduledTransactionNodes = new Map<string, XmlNode>();
 
   private constructor(root: XmlNode, book: XmlNode) {
     this.root = root;
@@ -544,6 +710,7 @@ export class GncXmlDocument {
     this.customerNodes.clear();
     this.invoiceNodes.clear();
     this.vendorNodes.clear();
+    this.scheduledTransactionNodes.clear();
     for (const accountNode of children(this.book, "account")) {
       const guid = decoded(first(accountNode, "id"));
       if (guid) this.accountNodes.set(guid, accountNode);
@@ -566,6 +733,10 @@ export class GncXmlDocument {
     for (const vendorNode of children(this.book, "GncVendor")) {
       const guid = decoded(first(vendorNode, "guid"));
       if (guid) this.vendorNodes.set(guid, vendorNode);
+    }
+    for (const sxNode of children(this.book, "schedxaction")) {
+      const guid = decoded(first(sxNode, "id"));
+      if (guid) this.scheduledTransactionNodes.set(guid, sxNode);
     }
   }
 
@@ -977,6 +1148,468 @@ export class GncXmlDocument {
         if (splitSlots.children.length === 0) removeChild(splitNode, splitSlots);
       }
     }
+  }
+
+  // MARK: scheduled transactions
+
+  private findTemplateTransactionsNode(): XmlNode | undefined {
+    return first(this.book, "template-transactions");
+  }
+
+  private findOrCreateTemplateTransactionsNode(): XmlNode {
+    const existing = this.findTemplateTransactionsNode();
+    if (existing) return existing;
+    const created = node("gnc:template-transactions", {}, []);
+    this.book.children.push(created);
+    return created;
+  }
+
+  /**
+   * The single, book-wide hidden "Template Root" account every scheduled
+   * transaction's own template account lives under, matching desktop
+   * GnuCash's `gnc_book_get_template_root` -- verified against a real
+   * GnuCash test fixture (`bug-746937-sx-split-order.gnucash`), not
+   * guessed. Created the first time any scheduled transaction is made;
+   * `templateRootGuid` is only used then.
+   */
+  private findOrCreateTemplateRootNode(
+    templateTransactionsNode: XmlNode,
+    templateRootGuid: Guid | undefined,
+  ): XmlNode {
+    const existing = children(templateTransactionsNode, "account").find(
+      (accountNode) => decoded(first(accountNode, "type")) === "ROOT",
+    );
+    if (existing) return existing;
+    if (!templateRootGuid) {
+      throw new GncXmlError(
+        "creating the first scheduled transaction in this book requires ids.templateRoot",
+      );
+    }
+    const created = node("gnc:account", { version: "2.0.0" }, [
+      leaf("act:name", "Template Root"),
+      guidNode("act:id", templateRootGuid),
+      leaf("act:type", "ROOT"),
+      commodityNode("act:commodity", { space: "template", id: "template" }),
+      leaf("act:commodity-scu", "1"),
+    ]);
+    templateTransactionsNode.children.push(created);
+    return created;
+  }
+
+  /** Named after its own guid, like real GnuCash -- never shown to a user. */
+  private createTemplateAccountNode(guid: Guid, parentGuid: string): XmlNode {
+    return node("gnc:account", { version: "2.0.0" }, [
+      leaf("act:name", guid),
+      guidNode("act:id", guid),
+      leaf("act:type", "BANK"),
+      commodityNode("act:commodity", { space: "template", id: "template" }),
+      leaf("act:commodity-scu", "1"),
+      guidNode("act:parent", parentGuid),
+    ]);
+  }
+
+  private findTemplateTransactionNode(
+    templateAccountGuid: string,
+  ): XmlNode | undefined {
+    const templateTransactionsNode = this.findTemplateTransactionsNode();
+    if (!templateTransactionsNode) return undefined;
+    return children(templateTransactionsNode, "transaction").find((transactionNode) => {
+      const splitsContainer = first(transactionNode, "splits") ?? transactionNode;
+      return children(splitsContainer, "split").some(
+        (splitNode) => decoded(first(splitNode, "account")) === templateAccountGuid,
+      );
+    });
+  }
+
+  private currencyFraction(ref: CommodityRef): bigint {
+    const match = this.commodities().find(
+      (commodity) => commodity.space === ref.space && commodity.id === ref.id,
+    );
+    return match?.fraction ? BigInt(match.fraction) : 100n;
+  }
+
+  /**
+   * Creates a scheduled transaction: a recurrence rule plus a template of
+   * splits, matching desktop GnuCash's own on-disk shape exactly (verified
+   * against a real GnuCash test fixture, not guessed) -- a hidden,
+   * per-schedule template account (type `BANK`, named after its own guid)
+   * under the one shared, book-wide "Template Root" account; a template
+   * `gnc:transaction` whose splits point at that template account (never
+   * the real one); and a `sched-xaction` KVP frame on each split carrying
+   * the real account and amount. Both sides of every split's KVP
+   * (`credit-*`/`debit-*`) are always written, matching real GnuCash --
+   * the unused side is an empty formula and a zero numeric, never
+   * omitted. Amount formulas are always a plain decimal number in this
+   * engine (Milestone 1: no algebraic formula evaluation).
+   */
+  createScheduledTransaction(
+    input: CreateScheduledTransactionInput,
+    ids: CreateScheduledTransactionIds,
+  ): XmlScheduledTransaction {
+    if (this.scheduledTransactionNodes.has(ids.scheduledTransaction)) {
+      throw new GncXmlError(
+        `duplicate scheduled transaction ${ids.scheduledTransaction}`,
+      );
+    }
+    if (input.templateSplits.length < 2) {
+      throw new GncXmlError(
+        "a scheduled transaction needs at least two template splits",
+      );
+    }
+    if (input.templateSplits.length !== ids.templateSplits.length) {
+      throw new GncXmlError("one split id is required per template split");
+    }
+    let total: Money = { num: 0n, denom: 1n };
+    for (const split of input.templateSplits) total = addMoney(total, split.value);
+    if (!equalsMoney(total, { num: 0n, denom: 1n })) {
+      throw new GncXmlError("template split values must sum to zero");
+    }
+
+    const templateTransactionsNode = this.findOrCreateTemplateTransactionsNode();
+    const templateRootNode = this.findOrCreateTemplateRootNode(
+      templateTransactionsNode,
+      ids.templateRoot,
+    );
+    const templateRootGuid = decoded(first(templateRootNode, "id"));
+    const templateAccountNode = this.createTemplateAccountNode(
+      ids.templateAccount,
+      templateRootGuid,
+    );
+    templateTransactionsNode.children.push(templateAccountNode);
+
+    const currencyFraction = this.currencyFraction(input.currency);
+    const zeroValue: Money = { num: 0n, denom: currencyFraction };
+    const zeroQuantity: Money = { num: 0n, denom: 1n };
+    const splitNodes = input.templateSplits.map((split, index) => {
+      const splitId = ids.templateSplits[index];
+      if (!splitId) throw new GncXmlError("missing template split id");
+      const isDebit = split.value.num >= 0n;
+      const magnitude: Money = isDebit ? split.value : negateMoney(split.value);
+      const debitFormula = isDebit ? formatMoney(magnitude, magnitude.denom) : "";
+      const creditFormula = isDebit ? "" : formatMoney(magnitude, magnitude.denom);
+      const debitNumeric = isDebit ? rationalText(magnitude) : "0/1";
+      const creditNumeric = isDebit ? "0/1" : rationalText(magnitude);
+      const splitNode = node("trn:split", {}, [
+        guidNode("split:id", splitId),
+        leaf("split:reconciled-state", "n"),
+        leaf("split:value", rationalText(zeroValue)),
+        leaf("split:quantity", rationalText(zeroQuantity)),
+        guidNode("split:account", ids.templateAccount),
+      ]);
+      const slots = findOrCreateSlots(splitNode, "split");
+      slots.children.push(
+        node("slot", {}, [
+          leaf("slot:key", "sched-xaction"),
+          frameSlotValue([
+            { key: "account", type: "guid", text: split.accountGuid },
+            { key: "credit-formula", type: "string", text: creditFormula },
+            { key: "credit-numeric", type: "numeric", text: creditNumeric },
+            { key: "debit-formula", type: "string", text: debitFormula },
+            { key: "debit-numeric", type: "numeric", text: debitNumeric },
+          ]),
+        ]),
+      );
+      return splitNode;
+    });
+
+    const templateTransactionNode = node("gnc:transaction", { version: "2.0.0" }, [
+      guidNode("trn:id", ids.templateTransaction),
+      commodityNode("trn:currency", input.currency),
+      node("trn:date-posted", {}, [leaf("ts:date", `${input.start} 00:00:00 +0000`)]),
+      node("trn:date-entered", {}, [leaf("ts:date", `${input.start} 00:00:00 +0000`)]),
+      leaf("trn:description", input.description),
+      node("trn:splits", {}, splitNodes),
+    ]);
+    templateTransactionsNode.children.push(templateTransactionNode);
+
+    const sxChildren: XmlNode[] = [
+      guidNode("sx:id", ids.scheduledTransaction),
+      leaf("sx:name", input.name),
+      leaf("sx:enabled", input.enabled === false ? "n" : "y"),
+      leaf("sx:autoCreate", input.autoCreate ? "y" : "n"),
+      leaf("sx:autoCreateNotify", input.autoCreateNotify ? "y" : "n"),
+      leaf("sx:advanceCreateDays", String(input.advanceCreateDays ?? 0)),
+      leaf("sx:advanceRemindDays", String(input.advanceRemindDays ?? 0)),
+      leaf("sx:instanceCount", "0"),
+      gdateNode("sx:start", input.start),
+    ];
+    if (input.end) {
+      if ("occurrences" in input.end) {
+        sxChildren.push(leaf("sx:num-occur", String(input.end.occurrences)));
+        sxChildren.push(leaf("sx:rem-occur", String(input.end.occurrences)));
+      } else {
+        sxChildren.push(gdateNode("sx:end", input.end.date));
+      }
+    }
+    sxChildren.push(guidNode("sx:templ-acct", ids.templateAccount));
+    const recurrenceChildren: XmlNode[] = [
+      leaf("recurrence:mult", String(input.recurrence.multiplier)),
+      leaf("recurrence:period_type", PERIOD_TYPE_TO_XML[input.recurrence.periodType]),
+      gdateNode("recurrence:start", input.recurrence.start),
+    ];
+    if (input.recurrence.weekendAdjust !== "none") {
+      recurrenceChildren.push(
+        leaf("recurrence:weekend_adj", input.recurrence.weekendAdjust),
+      );
+    }
+    sxChildren.push(
+      node("sx:schedule", {}, [
+        node("gnc:recurrence", { version: "1.0.0" }, recurrenceChildren),
+      ]),
+    );
+
+    const sxNode = node("gnc:schedxaction", { version: "2.0.0" }, sxChildren);
+    this.book.children.push(sxNode);
+    this.scheduledTransactionNodes.set(ids.scheduledTransaction, sxNode);
+    return this.readScheduledTransaction(sxNode);
+  }
+
+  scheduledTransactions(): XmlScheduledTransaction[] {
+    return [...this.scheduledTransactionNodes.values()].map((sxNode) =>
+      this.readScheduledTransaction(sxNode),
+    );
+  }
+
+  scheduledTransaction(guid: string): XmlScheduledTransaction | undefined {
+    const sxNode = this.scheduledTransactionNodes.get(guid);
+    return sxNode ? this.readScheduledTransaction(sxNode) : undefined;
+  }
+
+  private readScheduledTransaction(sxNode: XmlNode): XmlScheduledTransaction {
+    const guid = decoded(first(sxNode, "id"));
+    const name = decoded(first(sxNode, "name"));
+    const enabled = decoded(first(sxNode, "enabled")) !== "n";
+    const autoCreate = decoded(first(sxNode, "autoCreate")) === "y";
+    const autoCreateNotify = decoded(first(sxNode, "autoCreateNotify")) === "y";
+    const advanceCreateDays = Number(
+      decoded(first(sxNode, "advanceCreateDays")) || "0",
+    );
+    const advanceRemindDays = Number(
+      decoded(first(sxNode, "advanceRemindDays")) || "0",
+    );
+    const instanceCount = Number(decoded(first(sxNode, "instanceCount")) || "0");
+    const start = readGdate(sxNode, "start") ?? "";
+    const lastOccurred = readGdate(sxNode, "last");
+    const numOccurNode = first(sxNode, "num-occur");
+    const endDate = readGdate(sxNode, "end");
+    const end = numOccurNode
+      ? { occurrences: Number(decoded(numOccurNode)) }
+      : endDate
+        ? { date: endDate }
+        : null;
+    const templateAccountGuid = decoded(first(sxNode, "templ-acct"));
+
+    const scheduleNode = first(sxNode, "schedule");
+    const recurrenceNode = scheduleNode ? first(scheduleNode, "recurrence") : undefined;
+    const multiplier = recurrenceNode
+      ? Number(decoded(first(recurrenceNode, "mult")) || "1")
+      : 1;
+    const periodTypeXml = recurrenceNode
+      ? decoded(first(recurrenceNode, "period_type"))
+      : "once";
+    const periodType = PERIOD_TYPE_FROM_XML.get(periodTypeXml) ?? "once";
+    const recurrenceStart =
+      (recurrenceNode ? readGdate(recurrenceNode, "start") : null) ?? start;
+    const weekendAdjustText = recurrenceNode
+      ? decoded(first(recurrenceNode, "weekend_adj"))
+      : "";
+    const weekendAdjust: WeekendAdjust =
+      weekendAdjustText === "back" || weekendAdjustText === "forward"
+        ? weekendAdjustText
+        : "none";
+
+    const templateTransactionNode =
+      this.findTemplateTransactionNode(templateAccountGuid);
+    let description = "";
+    let currency: CommodityRef = { space: "CURRENCY", id: "USD" };
+    const templateSplits: XmlScheduledSplit[] = [];
+    if (templateTransactionNode) {
+      description = decoded(first(templateTransactionNode, "description"));
+      currency = readCommodityRef(templateTransactionNode, "currency") ?? currency;
+      const splitsContainer =
+        first(templateTransactionNode, "splits") ?? templateTransactionNode;
+      for (const splitNode of children(splitsContainer, "split")) {
+        const frame = readFrameSlotEntries(splitNode, "sched-xaction");
+        const realAccountGuid = frame.get("account");
+        if (!realAccountGuid) continue;
+        const debitNumeric = frame.get("debit-numeric");
+        const creditNumeric = frame.get("credit-numeric");
+        const debitMoney = debitNumeric ? rational(debitNumeric) : null;
+        const creditMoney = creditNumeric ? rational(creditNumeric) : null;
+        const value: Money =
+          debitMoney && debitMoney.num !== 0n
+            ? debitMoney
+            : creditMoney && creditMoney.num !== 0n
+              ? { num: -creditMoney.num, denom: creditMoney.denom }
+              : { num: 0n, denom: 1n };
+        templateSplits.push({ accountGuid: realAccountGuid, value });
+      }
+    }
+
+    return {
+      guid,
+      name,
+      description,
+      currency,
+      enabled,
+      autoCreate,
+      autoCreateNotify,
+      advanceCreateDays,
+      advanceRemindDays,
+      start,
+      lastOccurred,
+      instanceCount,
+      end,
+      recurrence: { periodType, multiplier, start: recurrenceStart, weekendAdjust },
+      templateAccountGuid,
+      templateSplits,
+    };
+  }
+
+  updateScheduledTransaction(
+    guid: string,
+    patch: UpdateScheduledTransactionInput,
+  ): XmlScheduledTransaction {
+    const sxNode = this.scheduledTransactionNodes.get(guid);
+    if (!sxNode) throw new GncXmlError(`unknown scheduled transaction ${guid}`);
+    if (patch.name !== undefined) setLeafText(sxNode, "sx:name", patch.name);
+    if (patch.enabled !== undefined) {
+      setLeafText(sxNode, "sx:enabled", patch.enabled ? "y" : "n");
+    }
+    if (patch.autoCreate !== undefined) {
+      setLeafText(sxNode, "sx:autoCreate", patch.autoCreate ? "y" : "n");
+    }
+    if (patch.autoCreateNotify !== undefined) {
+      setLeafText(sxNode, "sx:autoCreateNotify", patch.autoCreateNotify ? "y" : "n");
+    }
+    if (patch.advanceCreateDays !== undefined) {
+      setLeafText(sxNode, "sx:advanceCreateDays", String(patch.advanceCreateDays));
+    }
+    if (patch.advanceRemindDays !== undefined) {
+      setLeafText(sxNode, "sx:advanceRemindDays", String(patch.advanceRemindDays));
+    }
+    return this.readScheduledTransaction(sxNode);
+  }
+
+  /** Also removes its template account and template transaction. */
+  deleteScheduledTransaction(guid: string): void {
+    const sxNode = this.scheduledTransactionNodes.get(guid);
+    if (!sxNode) return;
+    const templateAccountGuid = decoded(first(sxNode, "templ-acct"));
+    const templateTransactionsNode = this.findTemplateTransactionsNode();
+    if (templateTransactionsNode) {
+      const templateTransactionNode =
+        this.findTemplateTransactionNode(templateAccountGuid);
+      if (templateTransactionNode) {
+        removeChild(templateTransactionsNode, templateTransactionNode);
+      }
+      const templateAccountNode = children(templateTransactionsNode, "account").find(
+        (accountNode) => decoded(first(accountNode, "id")) === templateAccountGuid,
+      );
+      if (templateAccountNode)
+        removeChild(templateTransactionsNode, templateAccountNode);
+    }
+    removeChild(this.book, sxNode);
+    this.scheduledTransactionNodes.delete(guid);
+  }
+
+  /**
+   * Every enabled schedule's due instances as of `asOf`, classified by what
+   * should happen to them -- this is a pure read, it never posts or
+   * mutates anything; the caller (the web route, when the book is opened)
+   * is responsible for calling `postScheduledInstance` for every
+   * `"autoPost"`/`"autoPostNotify"` result and surfacing `"needsApproval"`/
+   * `"reminder"` ones for the owner to act on.
+   */
+  dueScheduledInstances(asOf: string): DueScheduledInstance[] {
+    const results: DueScheduledInstance[] = [];
+    for (const sx of this.scheduledTransactions()) {
+      if (!sx.enabled) continue;
+      if (sx.end && "occurrences" in sx.end && sx.instanceCount >= sx.end.occurrences)
+        continue;
+      const createBoundary = addDays(asOf, sx.advanceCreateDays);
+      const remindBoundary = addDays(createBoundary, sx.advanceRemindDays);
+      let current = sx.lastOccurred ?? "0001-01-01";
+      for (let guard = 0; guard < 1000; guard += 1) {
+        const next = nextInstance(sx.recurrence, current);
+        if (next === null) break;
+        if (sx.end && "date" in sx.end && next > sx.end.date) break;
+        if (next > remindBoundary) break;
+        const action: DueInstanceAction =
+          next <= createBoundary
+            ? sx.autoCreate
+              ? sx.autoCreateNotify
+                ? "autoPostNotify"
+                : "autoPost"
+              : "needsApproval"
+            : "reminder";
+        results.push({
+          scheduledTransactionGuid: sx.guid,
+          name: sx.name,
+          date: next,
+          action,
+        });
+        if (action === "reminder") break;
+        current = next;
+      }
+    }
+    return results;
+  }
+
+  /** Posts a real transaction from the template and advances `sx:last`. */
+  postScheduledInstance(
+    scheduledTransactionGuid: string,
+    date: string,
+    ids: PostTransactionIds,
+  ): XmlTransaction {
+    const sx = this.scheduledTransaction(scheduledTransactionGuid);
+    if (!sx) {
+      throw new GncXmlError(
+        `unknown scheduled transaction ${scheduledTransactionGuid}`,
+      );
+    }
+    const result = this.postTransaction(
+      {
+        currency: sx.currency,
+        datePosted: `${date} 00:00:00 +0000`,
+        dateEntered: `${date} 00:00:00 +0000`,
+        description: sx.description,
+        splits: sx.templateSplits.map((split) => ({
+          accountGuid: split.accountGuid,
+          value: split.value,
+        })),
+      },
+      ids,
+    );
+    this.advanceScheduledTransaction(scheduledTransactionGuid, date);
+    return result;
+  }
+
+  /** Advances `sx:last` past this instance without posting anything -- Milestone 1's "skip". */
+  skipScheduledInstance(scheduledTransactionGuid: string, date: string): void {
+    if (!this.scheduledTransactionNodes.has(scheduledTransactionGuid)) {
+      throw new GncXmlError(
+        `unknown scheduled transaction ${scheduledTransactionGuid}`,
+      );
+    }
+    this.advanceScheduledTransaction(scheduledTransactionGuid, date);
+  }
+
+  private advanceScheduledTransaction(guid: string, date: string): void {
+    const sxNode = this.scheduledTransactionNodes.get(guid);
+    if (!sxNode) return;
+    const existingLast = first(sxNode, "last");
+    if (existingLast) {
+      setLeafText(existingLast, "gdate", date);
+    } else {
+      const startNode = first(sxNode, "start");
+      const insertAt = startNode
+        ? sxNode.children.indexOf(startNode) + 1
+        : sxNode.children.length;
+      sxNode.children.splice(insertAt, 0, gdateNode("sx:last", date));
+    }
+    const instanceCount = Number(decoded(first(sxNode, "instanceCount")) || "0");
+    setLeafText(sxNode, "sx:instanceCount", String(instanceCount + 1));
   }
 
   // MARK: customers

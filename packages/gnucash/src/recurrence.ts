@@ -154,6 +154,12 @@ function resolveDay(
   }
 }
 
+/** Adds (or, with a negative count, subtracts) whole days to a `YYYY-MM-DD` date. */
+export function addDays(date: string, days: number): string {
+  const parts = parseIso(date);
+  return formatIso(civilFromDays(daysFromCivil(parts.y, parts.m, parts.d) + days));
+}
+
 function applyWeekendAdjust(parts: DateParts, adjust: WeekendAdjust): DateParts {
   if (adjust === "none") return parts;
   const weekday = dayOfWeek(parts);
