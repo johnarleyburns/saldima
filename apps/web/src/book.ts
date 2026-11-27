@@ -2092,8 +2092,17 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
     const accounts = new Map(
       (document?.accounts() ?? []).map((row) => [row.guid, row.name]),
     );
+    const query = (c.req.query("q") ?? "").trim();
+    const needle = query.toLowerCase();
+    const matches = (tx: XmlTransaction): boolean =>
+      needle === "" ||
+      tx.description.toLowerCase().includes(needle) ||
+      tx.splits.some((split) => split.memo.toLowerCase().includes(needle)) ||
+      tx.splits.some((split) =>
+        (accounts.get(split.accountGuid) ?? "").toLowerCase().includes(needle),
+      );
     const txs = (document?.transactions() ?? [])
-      .slice()
+      .filter(matches)
       .sort((left, right) =>
         left.datePosted === right.datePosted
           ? left.guid.localeCompare(right.guid)
@@ -2125,7 +2134,14 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
         `<h1>General Journal</h1>
 <p class="muted">Every transaction in this book, like Tools → General Journal.</p>
 <p><a href="/app/journal/new" class="cta">New transaction</a></p>
-${items || `<p class="muted">No transactions yet.</p>`}${txs.length > 200 ? `<p class="muted">Showing the most recent 200 of ${txs.length} transactions.</p>` : ""}`,
+<form method="get" action="/app/journal" class="card" style="margin-bottom:1rem">
+<label for="journal-search">Find transactions</label>
+<input id="journal-search" name="q" type="text" placeholder="Description, memo or account" value="${escapeHtml(query)}">
+<button type="submit" class="secondary">Search</button>
+${query ? `<a href="/app/journal">Clear</a>` : ""}
+</form>
+${query ? `<p class="muted">${txs.length} match${txs.length === 1 ? "" : "es"} for "${escapeHtml(query)}".</p>` : ""}
+${items || `<p class="muted">${query ? "No matching transactions." : "No transactions yet."}</p>`}${txs.length > 200 ? `<p class="muted">Showing the most recent 200 of ${txs.length} transactions.</p>` : ""}`,
       ),
       200,
     );
