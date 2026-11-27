@@ -152,7 +152,9 @@ test("bills: add a vendor, create a bill, add a line and post it", async ({
   await page.getByLabel("Date", { exact: true }).fill("2026-03-01");
   await page.getByLabel("Quantity").fill("1");
   await page.getByLabel("Unit price").fill("60.00");
-  await page.getByLabel("Expense account").selectOption({ label: "E2E Office Expense" });
+  await page
+    .getByLabel("Expense account")
+    .selectOption({ label: "E2E Office Expense" });
   await page.getByRole("button", { name: "Add line" }).click();
   await expect(page.getByText("Printer paper")).toBeVisible();
   await expect(page.getByText("Total: 60.00")).toBeVisible();
