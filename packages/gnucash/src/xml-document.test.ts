@@ -994,6 +994,363 @@ describe("GncXmlDocument", () => {
     });
   });
 
+  describe("budgets", () => {
+    function createMonthlyBudget(doc: GncXmlDocument, guid: string) {
+      return doc.createBudget(
+        {
+          name: "2026 household",
+          description: "Household budget for 2026",
+          periodCount: 12,
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-01-01",
+            weekendAdjust: "none",
+          },
+        },
+        guidFrom(guid),
+      );
+    }
+
+    it("creates a budget matching real GnuCash's on-disk shape, and reads it back", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+
+      expect(budget).toEqual({
+        guid: "1".repeat(32),
+        name: "2026 household",
+        description: "Household budget for 2026",
+        periodCount: 12,
+        recurrence: {
+          periodType: "month",
+          multiplier: 1,
+          start: "2026-01-01",
+          weekendAdjust: "none",
+        },
+      });
+
+      const serialized = doc.serialize();
+      expect(serialized).toContain('<gnc:budget version="2.0.0">');
+      expect(serialized).toContain(`<bgt:id type="guid">${"1".repeat(32)}</bgt:id>`);
+      expect(serialized).toContain("<bgt:name>2026 household</bgt:name>");
+      expect(serialized).toContain("<bgt:num-periods>12</bgt:num-periods>");
+      // No separate wrapper -- the version attribute and recurrence:* children
+      // sit directly on <bgt:recurrence>, unlike sx:schedule's inner gnc:recurrence.
+      expect(serialized).toContain('<bgt:recurrence version="1.0.0">');
+      expect(serialized).toContain(
+        "<recurrence:period_type>month</recurrence:period_type>",
+      );
+      expect(serialized).not.toContain("<gnc:recurrence");
+
+      const reparsed = GncXmlDocument.parse(serialized);
+      expect(reparsed.budget(budget.guid)).toEqual(budget);
+    });
+
+    it("supports multiple budgets per book", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      createMonthlyBudget(doc, "1".repeat(32));
+      doc.createBudget(
+        {
+          name: "Vacation fund",
+          periodCount: 4,
+          recurrence: {
+            periodType: "end_of_month",
+            multiplier: 3,
+            start: "2026-01-01",
+            weekendAdjust: "none",
+          },
+        },
+        guidFrom("2".repeat(32)),
+      );
+      expect(
+        doc
+          .budgets()
+          .map((b) => b.name)
+          .sort(),
+      ).toEqual(["2026 household", "Vacation fund"]);
+    });
+
+    it("rejects a budget with fewer than one period", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      expect(() =>
+        doc.createBudget(
+          {
+            name: "Bad",
+            periodCount: 0,
+            recurrence: {
+              periodType: "month",
+              multiplier: 1,
+              start: "2026-01-01",
+              weekendAdjust: "none",
+            },
+          },
+          guidFrom("1".repeat(32)),
+        ),
+      ).toThrow(GncXmlError);
+    });
+
+    it("rejects a duplicate budget guid", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      createMonthlyBudget(doc, "1".repeat(32));
+      expect(() => createMonthlyBudget(doc, "1".repeat(32))).toThrow(GncXmlError);
+    });
+
+    it("updates name, description and periodCount independently", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+      const updated = doc.updateBudget(budget.guid, { name: "Renamed" });
+      expect(updated.name).toBe("Renamed");
+      expect(updated.description).toBe(budget.description);
+      expect(updated.periodCount).toBe(budget.periodCount);
+
+      const updated2 = doc.updateBudget(budget.guid, { periodCount: 6 });
+      expect(updated2.periodCount).toBe(6);
+      expect(updated2.name).toBe("Renamed");
+
+      const updated3 = doc.updateBudget(budget.guid, {
+        description: "New description",
+      });
+      expect(updated3.description).toBe("New description");
+      expect(updated3.name).toBe("Renamed");
+    });
+
+    it("rejects updating to fewer than one period, and updating an unknown budget", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+      expect(() => doc.updateBudget(budget.guid, { periodCount: 0 })).toThrow(
+        GncXmlError,
+      );
+      expect(() => doc.updateBudget("f".repeat(32), { name: "x" })).toThrow(
+        GncXmlError,
+      );
+    });
+
+    it("deletes a budget", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+      doc.deleteBudget(budget.guid);
+      expect(doc.budgets()).toEqual([]);
+      // Deleting an unknown budget is a silent no-op, matching deleteAccount/deleteTransaction.
+      expect(() => doc.deleteBudget("f".repeat(32))).not.toThrow();
+    });
+
+    it("computes each period's [start, end) range from the recurrence", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+      expect(doc.periodRange(budget, 0)).toEqual({
+        start: "2026-01-01",
+        end: "2026-02-01",
+      });
+      expect(doc.periodRange(budget, 1)).toEqual({
+        start: "2026-02-01",
+        end: "2026-03-01",
+      });
+      expect(doc.periodRange(budget, 11)).toEqual({
+        start: "2026-12-01",
+        end: "2027-01-01",
+      });
+      expect(() => doc.periodRange(budget, -1)).toThrow(GncXmlError);
+    });
+
+    it("throws computing a period's end past a 'once' recurrence's single instance", async () => {
+      // A "once" recurrence has no second instance, so it has no valid
+      // upper bound for any period -- not a realistic budget recurrence in
+      // practice (desktop GnuCash's own budget editor only offers repeating
+      // period types), but the engine should fail loudly rather than
+      // silently miscomputing a range.
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = doc.createBudget(
+        {
+          name: "One-off",
+          periodCount: 1,
+          recurrence: {
+            periodType: "once",
+            multiplier: 1,
+            start: "2026-01-01",
+            weekendAdjust: "none",
+          },
+        },
+        guidFrom("5".repeat(32)),
+      );
+      expect(() => doc.periodRange(budget, 0)).toThrow(GncXmlError);
+    });
+
+    it("sets, reads back and removes a per-account-per-period amount, never writing a zero placeholder", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+
+      expect(doc.budgetAmount(budget.guid, BANK, 0)).toBeNull();
+
+      doc.setBudgetAmount(budget.guid, BANK, 0, money(150000n, 100n));
+      expect(doc.budgetAmount(budget.guid, BANK, 0)).toEqual(money(150000n, 100n));
+
+      const serialized = doc.serialize();
+      expect(serialized).toContain(`<slot:key>${BANK}</slot:key>`);
+      expect(serialized).toContain('<slot:value type="frame">');
+      expect(serialized).toContain("<slot:key>0</slot:key>");
+      expect(serialized).toContain(
+        '<slot:key>0</slot:key><slot:value type="numeric">150000/100</slot:value>',
+      );
+
+      const reparsed = GncXmlDocument.parse(serialized);
+      expect(reparsed.budgetAmount(budget.guid, BANK, 0)).toEqual(money(150000n, 100n));
+
+      doc.setBudgetAmount(budget.guid, BANK, 0, null);
+      expect(doc.budgetAmount(budget.guid, BANK, 0)).toBeNull();
+      // Removing the only set period removes the now-empty account frame too.
+      expect(doc.serialize()).not.toContain(`<slot:key>${BANK}</slot:key>`);
+    });
+
+    it("tracks several accounts and periods independently on the same budget", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+      doc.setBudgetAmount(budget.guid, BANK, 0, money(100000n, 100n));
+      doc.setBudgetAmount(budget.guid, BANK, 1, money(110000n, 100n));
+      doc.setBudgetAmount(budget.guid, SALARY, 0, money(-250000n, 100n));
+
+      expect(doc.budgetAmount(budget.guid, BANK, 0)).toEqual(money(100000n, 100n));
+      expect(doc.budgetAmount(budget.guid, BANK, 1)).toEqual(money(110000n, 100n));
+      expect(doc.budgetAmount(budget.guid, BANK, 2)).toBeNull();
+      expect(doc.budgetAmount(budget.guid, SALARY, 0)).toEqual(money(-250000n, 100n));
+
+      // Overwriting an already-set period updates it in place.
+      doc.setBudgetAmount(budget.guid, BANK, 1, money(120000n, 100n));
+      expect(doc.budgetAmount(budget.guid, BANK, 1)).toEqual(money(120000n, 100n));
+
+      // Removing a period that was never set, on an account that still has
+      // a frame (because another period on it is set), is also a no-op.
+      doc.setBudgetAmount(budget.guid, BANK, 5, null);
+      expect(doc.budgetAmount(budget.guid, BANK, 5)).toBeNull();
+      expect(doc.budgetAmount(budget.guid, BANK, 1)).toEqual(money(120000n, 100n));
+
+      // Removing one period leaves the account's other set period untouched.
+      doc.setBudgetAmount(budget.guid, BANK, 0, null);
+      expect(doc.budgetAmount(budget.guid, BANK, 0)).toBeNull();
+      expect(doc.budgetAmount(budget.guid, BANK, 1)).toEqual(money(120000n, 100n));
+    });
+
+    it("removing an amount from an unknown budget or an account with no frame is a silent no-op", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+      expect(() => doc.setBudgetAmount(budget.guid, BANK, 0, null)).not.toThrow();
+      expect(doc.budgetAmount("f".repeat(32), BANK, 0)).toBeNull();
+    });
+
+    it("rejects setting an amount on an unknown budget or a negative period index", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+      expect(() => doc.setBudgetAmount("f".repeat(32), BANK, 0, money(1n, 1n))).toThrow(
+        GncXmlError,
+      );
+      expect(() => doc.setBudgetAmount(budget.guid, BANK, -1, money(1n, 1n))).toThrow(
+        GncXmlError,
+      );
+    });
+
+    it("computes actual as the sum of an account's splits inside the period, live, never stored", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const budget = createMonthlyBudget(doc, "1".repeat(32));
+
+      doc.postTransaction(
+        {
+          currency: USD,
+          datePosted: "2026-01-15 10:00:00 +0000",
+          dateEntered: "2026-01-15 10:00:00 +0000",
+          description: "January paycheck",
+          splits: [
+            { accountGuid: BANK, value: money(300000n, 100n) },
+            { accountGuid: SALARY, value: money(-300000n, 100n) },
+          ],
+        },
+        {
+          transaction: guidFrom("9".repeat(32)),
+          splits: [guidFrom("a0".repeat(16)), guidFrom("a1".repeat(16))],
+        },
+      );
+      // Outside period 0's range -- must not be counted.
+      doc.postTransaction(
+        {
+          currency: USD,
+          datePosted: "2026-02-15 10:00:00 +0000",
+          dateEntered: "2026-02-15 10:00:00 +0000",
+          description: "February paycheck",
+          splits: [
+            { accountGuid: BANK, value: money(300000n, 100n) },
+            { accountGuid: SALARY, value: money(-300000n, 100n) },
+          ],
+        },
+        {
+          transaction: guidFrom("a".repeat(32)),
+          splits: [guidFrom("b0".repeat(16)), guidFrom("b1".repeat(16))],
+        },
+      );
+
+      // addMoney reduces to lowest terms, so 300000/100 comes back as 3000/1.
+      expect(doc.budgetActual(budget.guid, BANK, 0)).toEqual(money(3000n, 1n));
+      expect(doc.budgetActual(budget.guid, SALARY, 0)).toEqual(money(-3000n, 1n));
+      expect(doc.budgetActual(budget.guid, BANK, 1)).toEqual(money(3000n, 1n));
+      // Never written to disk.
+      expect(doc.serialize()).not.toContain("budget-actual");
+    });
+
+    it("throws computing actual for an unknown budget", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      expect(() => doc.budgetActual("f".repeat(32), BANK, 0)).toThrow(GncXmlError);
+    });
+
+    it("round-trips a hand-written budget fixture with pre-existing amounts untouched", () => {
+      const xml = `<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:bgt="http://www.gnucash.org/XML/bgt" xmlns:book="http://www.gnucash.org/XML/book" xmlns:recurrence="http://www.gnucash.org/XML/recurrence" xmlns:slot="http://www.gnucash.org/XML/slot">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"b".repeat(32)}</book:id>
+<gnc:budget version="2.0.0">
+  <bgt:id type="guid">${"7".repeat(32)}</bgt:id>
+  <bgt:name>Hand-written</bgt:name>
+  <bgt:description>A fixture written by hand, not this engine</bgt:description>
+  <bgt:num-periods>3</bgt:num-periods>
+  <bgt:recurrence version="1.0.0">
+    <recurrence:mult>1</recurrence:mult>
+    <recurrence:period_type>month</recurrence:period_type>
+    <recurrence:start><gdate>2026-06-01</gdate></recurrence:start>
+  </bgt:recurrence>
+  <bgt:slots>
+    <slot>
+      <slot:key>${BANK}</slot:key>
+      <slot:value type="frame">
+        <slot><slot:key>0</slot:key><slot:value type="numeric">50000/100</slot:value></slot>
+        <slot><slot:key>2</slot:key><slot:value type="numeric">60000/100</slot:value></slot>
+      </slot:value>
+    </slot>
+  </bgt:slots>
+</gnc:budget>
+</gnc:book>
+</gnc-v2>`;
+      const doc = GncXmlDocument.parse(xml);
+      expect(doc.budget("7".repeat(32))).toEqual({
+        guid: "7".repeat(32),
+        name: "Hand-written",
+        description: "A fixture written by hand, not this engine",
+        periodCount: 3,
+        recurrence: {
+          periodType: "month",
+          multiplier: 1,
+          start: "2026-06-01",
+          weekendAdjust: "none",
+        },
+      });
+      expect(doc.budgetAmount("7".repeat(32), BANK, 0)).toEqual(money(50000n, 100n));
+      expect(doc.budgetAmount("7".repeat(32), BANK, 1)).toBeNull();
+      expect(doc.budgetAmount("7".repeat(32), BANK, 2)).toEqual(money(60000n, 100n));
+
+      const serialized = doc.serialize();
+      const reparsed = GncXmlDocument.parse(serialized);
+      expect(reparsed.budget("7".repeat(32))).toEqual(doc.budget("7".repeat(32)));
+      expect(reparsed.budgetAmount("7".repeat(32), BANK, 0)).toEqual(
+        money(50000n, 100n),
+      );
+    });
+  });
+
   it("creates a customer, an invoice with lines, and posts it as a real transaction", async () => {
     const doc = GncXmlDocument.parse(await loadFixtureXml());
     const customerGuid = guidFrom("c".repeat(32));

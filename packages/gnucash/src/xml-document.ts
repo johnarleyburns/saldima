@@ -7,9 +7,9 @@
  * one-shot import/export), this keeps the original parsed element tree and
  * mutates it in place: known objects (accounts, transactions, splits) are
  * read from and written back to their own nodes, and anything this engine
- * does not model (other commodities, prices, lots, budgets, unrelated
- * slots) is never touched, so it survives a parse/edit/serialize round
- * trip untouched.
+ * does not model (other commodities, prices, lots, unrelated slots) is
+ * never touched, so it survives a parse/edit/serialize round trip
+ * untouched.
  */
 
 import {
@@ -189,6 +189,40 @@ export interface DueScheduledInstance {
   readonly name: string;
   readonly date: string;
   readonly action: DueInstanceAction;
+}
+
+/**
+ * A GnuCash `GncBudget` (desktop's "Budgets"): a recurrence plus a count of
+ * periods. Per-account-per-period budgeted amounts live on the budget's own
+ * KVP frame (`budgetAmount`/`setBudgetAmount`), not here -- matching real
+ * GnuCash, where an unset period is simply absent, never a zero. Milestone
+ * 1 (issue tracked in the repo): no per-period notes, no book-level
+ * default-budget option.
+ */
+export interface XmlBudget {
+  readonly guid: string;
+  readonly name: string;
+  readonly description: string;
+  readonly periodCount: number;
+  readonly recurrence: Recurrence;
+}
+
+export interface CreateBudgetInput {
+  readonly name: string;
+  readonly description?: string;
+  readonly periodCount: number;
+  readonly recurrence: Recurrence;
+}
+
+export interface UpdateBudgetInput {
+  readonly name?: string;
+  readonly description?: string;
+  readonly periodCount?: number;
+}
+
+export interface BudgetPeriodRange {
+  readonly start: string;
+  readonly end: string;
 }
 
 /** A GnuCash `GncCustomer` business object: a billing contact for invoices. */
@@ -516,7 +550,7 @@ function setLeafText(parent: XmlNode, tag: string, value: string): void {
 
 function findOrCreateSlots(
   accountOrTransactionOrSplit: XmlNode,
-  ownerTag: "act" | "trn" | "split",
+  ownerTag: "act" | "trn" | "split" | "bgt",
 ): XmlNode {
   return setOrCreateChild(accountOrTransactionOrSplit, "slots", () =>
     node(`${ownerTag}:slots`),
@@ -631,6 +665,53 @@ const PERIOD_TYPE_FROM_XML: ReadonlyMap<string, PeriodType> = new Map(
   ]),
 );
 
+/**
+ * Builds a `recurrence_to_dom_tree`-shaped node (`Recurrence.cpp`'s real
+ * writer, confirmed against `gnc-recurrence-xml-v2.cpp` source): the
+ * `version="1.0.0"` attribute and the `recurrence:*` children sit directly
+ * on the element named `tag` -- there is no further nesting. Scheduled
+ * transactions wrap this in a separate, attribute-less `<sx:schedule>`
+ * element (`tag` here is `"gnc:recurrence"`, a child of that wrapper);
+ * budgets have no such wrapper at all (`tag` is `"bgt:recurrence"`
+ * directly, confirmed against `gnc-budget-xml-v2.cpp`'s
+ * `recurrence_to_dom_tree(bgt_recurrence_string, recurrence)` call).
+ */
+function buildRecurrenceNode(tag: string, recurrence: Recurrence): XmlNode {
+  const children_: XmlNode[] = [
+    leaf("recurrence:mult", String(recurrence.multiplier)),
+    leaf("recurrence:period_type", PERIOD_TYPE_TO_XML[recurrence.periodType]),
+    gdateNode("recurrence:start", recurrence.start),
+  ];
+  if (recurrence.weekendAdjust !== "none") {
+    children_.push(leaf("recurrence:weekend_adj", recurrence.weekendAdjust));
+  }
+  return node(tag, { version: "1.0.0" }, children_);
+}
+
+/** Reads a recurrence node built by {@linkcode buildRecurrenceNode} (its caller locates it). */
+function readRecurrenceNode(
+  recurrenceNode: XmlNode | undefined,
+  fallbackStart: string,
+): Recurrence {
+  const multiplier = recurrenceNode
+    ? Number(decoded(first(recurrenceNode, "mult")) || "1")
+    : 1;
+  const periodTypeXml = recurrenceNode
+    ? decoded(first(recurrenceNode, "period_type"))
+    : "once";
+  const periodType = PERIOD_TYPE_FROM_XML.get(periodTypeXml) ?? "once";
+  const start =
+    (recurrenceNode ? readGdate(recurrenceNode, "start") : null) ?? fallbackStart;
+  const weekendAdjustText = recurrenceNode
+    ? decoded(first(recurrenceNode, "weekend_adj"))
+    : "";
+  const weekendAdjust: WeekendAdjust =
+    weekendAdjustText === "back" || weekendAdjustText === "forward"
+      ? weekendAdjustText
+      : "none";
+  return { periodType, multiplier, start, weekendAdjust };
+}
+
 function gdateNode(tag: string, date: string): XmlNode {
   return node(tag, {}, [leaf("gdate", date)]);
 }
@@ -690,6 +771,7 @@ export class GncXmlDocument {
   private readonly invoiceNodes = new Map<string, XmlNode>();
   private readonly vendorNodes = new Map<string, XmlNode>();
   private readonly scheduledTransactionNodes = new Map<string, XmlNode>();
+  private readonly budgetNodes = new Map<string, XmlNode>();
 
   private constructor(root: XmlNode, book: XmlNode) {
     this.root = root;
@@ -711,6 +793,7 @@ export class GncXmlDocument {
     this.invoiceNodes.clear();
     this.vendorNodes.clear();
     this.scheduledTransactionNodes.clear();
+    this.budgetNodes.clear();
     for (const accountNode of children(this.book, "account")) {
       const guid = decoded(first(accountNode, "id"));
       if (guid) this.accountNodes.set(guid, accountNode);
@@ -737,6 +820,10 @@ export class GncXmlDocument {
     for (const sxNode of children(this.book, "schedxaction")) {
       const guid = decoded(first(sxNode, "id"));
       if (guid) this.scheduledTransactionNodes.set(guid, sxNode);
+    }
+    for (const budgetNode of children(this.book, "budget")) {
+      const guid = decoded(first(budgetNode, "id"));
+      if (guid) this.budgetNodes.set(guid, budgetNode);
     }
   }
 
@@ -1342,19 +1429,9 @@ export class GncXmlDocument {
       }
     }
     sxChildren.push(guidNode("sx:templ-acct", ids.templateAccount));
-    const recurrenceChildren: XmlNode[] = [
-      leaf("recurrence:mult", String(input.recurrence.multiplier)),
-      leaf("recurrence:period_type", PERIOD_TYPE_TO_XML[input.recurrence.periodType]),
-      gdateNode("recurrence:start", input.recurrence.start),
-    ];
-    if (input.recurrence.weekendAdjust !== "none") {
-      recurrenceChildren.push(
-        leaf("recurrence:weekend_adj", input.recurrence.weekendAdjust),
-      );
-    }
     sxChildren.push(
       node("sx:schedule", {}, [
-        node("gnc:recurrence", { version: "1.0.0" }, recurrenceChildren),
+        buildRecurrenceNode("gnc:recurrence", input.recurrence),
       ]),
     );
 
@@ -1401,22 +1478,7 @@ export class GncXmlDocument {
 
     const scheduleNode = first(sxNode, "schedule");
     const recurrenceNode = scheduleNode ? first(scheduleNode, "recurrence") : undefined;
-    const multiplier = recurrenceNode
-      ? Number(decoded(first(recurrenceNode, "mult")) || "1")
-      : 1;
-    const periodTypeXml = recurrenceNode
-      ? decoded(first(recurrenceNode, "period_type"))
-      : "once";
-    const periodType = PERIOD_TYPE_FROM_XML.get(periodTypeXml) ?? "once";
-    const recurrenceStart =
-      (recurrenceNode ? readGdate(recurrenceNode, "start") : null) ?? start;
-    const weekendAdjustText = recurrenceNode
-      ? decoded(first(recurrenceNode, "weekend_adj"))
-      : "";
-    const weekendAdjust: WeekendAdjust =
-      weekendAdjustText === "back" || weekendAdjustText === "forward"
-        ? weekendAdjustText
-        : "none";
+    const recurrence = readRecurrenceNode(recurrenceNode, start);
 
     const templateTransactionNode =
       this.findTemplateTransactionNode(templateAccountGuid);
@@ -1460,7 +1522,7 @@ export class GncXmlDocument {
       lastOccurred,
       instanceCount,
       end,
-      recurrence: { periodType, multiplier, start: recurrenceStart, weekendAdjust },
+      recurrence,
       templateAccountGuid,
       templateSplits,
     };
@@ -1610,6 +1672,234 @@ export class GncXmlDocument {
     }
     const instanceCount = Number(decoded(first(sxNode, "instanceCount")) || "0");
     setLeafText(sxNode, "sx:instanceCount", String(instanceCount + 1));
+  }
+
+  // MARK: budgets
+
+  createBudget(input: CreateBudgetInput, guid: Guid): XmlBudget {
+    if (this.budgetNodes.has(guid)) {
+      throw new GncXmlError(`duplicate budget ${guid}`);
+    }
+    if (input.periodCount < 1) {
+      throw new GncXmlError("a budget needs at least one period");
+    }
+    const budgetNode = node("gnc:budget", { version: "2.0.0" }, [
+      guidNode("bgt:id", guid),
+      leaf("bgt:name", input.name),
+      leaf("bgt:description", input.description ?? ""),
+      leaf("bgt:num-periods", String(input.periodCount)),
+      buildRecurrenceNode("bgt:recurrence", input.recurrence),
+    ]);
+    this.book.children.push(budgetNode);
+    this.budgetNodes.set(guid, budgetNode);
+    return this.readBudget(budgetNode);
+  }
+
+  budgets(): XmlBudget[] {
+    return [...this.budgetNodes.values()].map((budgetNode) =>
+      this.readBudget(budgetNode),
+    );
+  }
+
+  budget(guid: string): XmlBudget | undefined {
+    const budgetNode = this.budgetNodes.get(guid);
+    return budgetNode ? this.readBudget(budgetNode) : undefined;
+  }
+
+  private readBudget(budgetNode: XmlNode): XmlBudget {
+    const guid = decoded(first(budgetNode, "id"));
+    const name = decoded(first(budgetNode, "name"));
+    const description = decoded(first(budgetNode, "description"));
+    const periodCount = Number(decoded(first(budgetNode, "num-periods")) || "0");
+    const recurrence = readRecurrenceNode(first(budgetNode, "recurrence"), "");
+    return { guid, name, description, periodCount, recurrence };
+  }
+
+  updateBudget(guid: string, patch: UpdateBudgetInput): XmlBudget {
+    const budgetNode = this.budgetNodes.get(guid);
+    if (!budgetNode) throw new GncXmlError(`unknown budget ${guid}`);
+    if (patch.name !== undefined) setLeafText(budgetNode, "bgt:name", patch.name);
+    if (patch.description !== undefined) {
+      setLeafText(budgetNode, "bgt:description", patch.description);
+    }
+    if (patch.periodCount !== undefined) {
+      if (patch.periodCount < 1) {
+        throw new GncXmlError("a budget needs at least one period");
+      }
+      setLeafText(budgetNode, "bgt:num-periods", String(patch.periodCount));
+    }
+    return this.readBudget(budgetNode);
+  }
+
+  deleteBudget(guid: string): void {
+    const budgetNode = this.budgetNodes.get(guid);
+    if (!budgetNode) return;
+    removeChild(this.book, budgetNode);
+    this.budgetNodes.delete(guid);
+  }
+
+  /**
+   * Period *N*'s `[start, end)` range: `instance(N)` to `instance(N+1)`,
+   * where `instance(0)` is the recurrence's own start and `instance(k)` is
+   * `nextInstance` applied `k` times -- matching desktop GnuCash's
+   * `recurrenceGetPeriodTime`, confirmed against `gnc-budget.cpp`.
+   */
+  periodRange(budget: XmlBudget, periodIndex: number): BudgetPeriodRange {
+    if (periodIndex < 0) {
+      throw new GncXmlError("periodIndex must be 0 or greater");
+    }
+    return {
+      start: this.nthRecurrenceInstance(budget.recurrence, periodIndex),
+      end: this.nthRecurrenceInstance(budget.recurrence, periodIndex + 1),
+    };
+  }
+
+  private nthRecurrenceInstance(recurrence: Recurrence, index: number): string {
+    let date = recurrence.start;
+    for (let step = 0; step < index; step++) {
+      const next = nextInstance(recurrence, date);
+      if (!next) throw new GncXmlError("recurrence has no further instances");
+      date = next;
+    }
+    return date;
+  }
+
+  /**
+   * The budget's own per-account KVP frame (`bgt:slots` -> one `slot`
+   * keyed by `accountGuid`, `type="frame"`, holding one nested `slot` per
+   * set period keyed by its number) -- the exact shape
+   * `make_period_data_path` writes in `gnc-budget.cpp`. `create: false`
+   * never creates anything, so it can return `undefined`; `create: true`
+   * always returns a real frame.
+   */
+  private findBudgetAccountFrame(
+    budgetNode: XmlNode,
+    accountGuid: string,
+    create: false,
+  ): XmlNode | undefined;
+  private findBudgetAccountFrame(
+    budgetNode: XmlNode,
+    accountGuid: string,
+    create: true,
+  ): XmlNode;
+  private findBudgetAccountFrame(
+    budgetNode: XmlNode,
+    accountGuid: string,
+    create: boolean,
+  ): XmlNode | undefined {
+    if (!create) {
+      const slots = first(budgetNode, "slots");
+      const accountSlot = slots ? findSlot(slots, accountGuid) : undefined;
+      return accountSlot ? first(accountSlot, "value") : undefined;
+    }
+    const slots = findOrCreateSlots(budgetNode, "bgt");
+    const accountSlot =
+      findSlot(slots, accountGuid) ??
+      (() => {
+        const created = node("slot", {}, [
+          leaf("slot:key", accountGuid),
+          frameSlotValue([]),
+        ]);
+        slots.children.push(created);
+        return created;
+      })();
+    const frame = first(accountSlot, "value");
+    if (!frame) throw new GncXmlError("corrupt budget account frame");
+    return frame;
+  }
+
+  /** Removes the whole per-account frame once its last period is cleared. */
+  private removeBudgetAccountFrameIfEmpty(
+    budgetNode: XmlNode,
+    accountGuid: string,
+  ): void {
+    const slots = first(budgetNode, "slots");
+    const accountSlot = slots ? findSlot(slots, accountGuid) : undefined;
+    const frame = accountSlot ? first(accountSlot, "value") : undefined;
+    if (slots && accountSlot && frame?.children.length === 0) {
+      removeChild(slots, accountSlot);
+    }
+  }
+
+  /**
+   * Sets (or, with `amount: null`, removes) one account's budgeted amount
+   * for one period. Matching real GnuCash: an unset period is simply
+   * absent from the KVP tree, never a zero placeholder.
+   */
+  setBudgetAmount(
+    budgetGuid: string,
+    accountGuid: string,
+    periodIndex: number,
+    amount: Money | null,
+  ): void {
+    const budgetNode = this.budgetNodes.get(budgetGuid);
+    if (!budgetNode) throw new GncXmlError(`unknown budget ${budgetGuid}`);
+    if (periodIndex < 0) throw new GncXmlError("periodIndex must be 0 or greater");
+    const periodKey = String(periodIndex);
+
+    if (amount === null) {
+      const frame = this.findBudgetAccountFrame(budgetNode, accountGuid, false);
+      if (!frame) return;
+      const existing = children(frame, "slot").find(
+        (slot) => decoded(first(slot, "key")) === periodKey,
+      );
+      if (existing) removeChild(frame, existing);
+      this.removeBudgetAccountFrameIfEmpty(budgetNode, accountGuid);
+      return;
+    }
+
+    const frame = this.findBudgetAccountFrame(budgetNode, accountGuid, true);
+    const existing = children(frame, "slot").find(
+      (slot) => decoded(first(slot, "key")) === periodKey,
+    );
+    if (existing) {
+      setLeafText(existing, "slot:value", rationalText(amount));
+    } else {
+      frame.children.push(
+        node("slot", {}, [
+          leaf("slot:key", periodKey),
+          leaf("slot:value", rationalText(amount), { type: "numeric" }),
+        ]),
+      );
+    }
+  }
+
+  /** `null` if this account's period has never been set -- never a zero placeholder. */
+  budgetAmount(
+    budgetGuid: string,
+    accountGuid: string,
+    periodIndex: number,
+  ): Money | null {
+    const budgetNode = this.budgetNodes.get(budgetGuid);
+    if (!budgetNode) return null;
+    const frame = this.findBudgetAccountFrame(budgetNode, accountGuid, false);
+    if (!frame) return null;
+    const periodKey = String(periodIndex);
+    const slot = children(frame, "slot").find(
+      (candidate) => decoded(first(candidate, "key")) === periodKey,
+    );
+    const valueNode = slot ? first(slot, "value") : undefined;
+    return valueNode ? rational(text(valueNode)) : null;
+  }
+
+  /**
+   * Sum of this account's split values whose transaction date falls in the
+   * period's `[start, end)` range. Desktop GnuCash computes "actual" the
+   * same way every time, live -- it's never stored.
+   */
+  budgetActual(budgetGuid: string, accountGuid: string, periodIndex: number): Money {
+    const budget = this.budget(budgetGuid);
+    if (!budget) throw new GncXmlError(`unknown budget ${budgetGuid}`);
+    const { start, end } = this.periodRange(budget, periodIndex);
+    let total: Money = { num: 0n, denom: 1n };
+    for (const transaction of this.transactions()) {
+      const day = transaction.datePosted.slice(0, 10);
+      if (day < start || day >= end) continue;
+      for (const split of transaction.splits) {
+        if (split.accountGuid === accountGuid) total = addMoney(total, split.value);
+      }
+    }
+    return total;
   }
 
   // MARK: customers

@@ -15,6 +15,7 @@ import {
   nextInstance,
   type PeriodType,
   parseMoneyHalfUp,
+  type Recurrence,
   readBookSnapshot,
   type WeekendAdjust,
   type XmlAccount,
@@ -500,6 +501,14 @@ export class Book {
       this.approveScheduledInstanceRoute(c),
     );
     app.post("/app/scheduled/:guid/skip", (c) => this.skipScheduledInstanceRoute(c));
+    app.get("/app/budgets", (c) => this.budgetsPage(c));
+    app.get("/app/budgets/new", (c) => this.newBudgetPage(c));
+    app.post("/app/budgets", (c) => this.createBudgetRoute(c));
+    app.get("/app/budgets/:guid/edit", (c) => this.editBudgetPage(c));
+    app.post("/app/budgets/:guid/edit", (c) => this.updateBudgetRoute(c));
+    app.post("/app/budgets/:guid/delete", (c) => this.deleteBudgetRoute(c));
+    app.get("/app/budgets/:guid", (c) => this.budgetGridPage(c));
+    app.post("/app/budgets/:guid", (c) => this.updateBudgetAmountsRoute(c));
     app.get("/app/security/totp", (c) => this.totpPage(c));
     app.post("/app/security/totp", (c) => this.totp(c));
     return app;
@@ -2367,8 +2376,8 @@ ${rows}
     year: "year",
   };
 
-  private describeRecurrence(sx: XmlScheduledTransaction): string {
-    const { multiplier, periodType } = sx.recurrence;
+  private describeRecurrence(entity: { recurrence: Recurrence }): string {
+    const { multiplier, periodType } = entity.recurrence;
     const label = Book.PERIOD_TYPE_LABELS[periodType];
     if (periodType === "once") return "Once";
     return multiplier > 1 ? `Every ${multiplier} ${label}s` : `Every ${label}`;
@@ -2756,6 +2765,323 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     return c.redirect("/app/journal");
   }
 
+  private async budgetsPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const budgets = (document?.budgets() ?? []).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+    const rows = budgets
+      .map(
+        (budget) => `<div class="card" style="margin-bottom:1rem">
+<h2 style="margin:0">${escapeHtml(budget.name)}</h2>
+<p class="muted">${escapeHtml(this.describeRecurrence(budget))} &middot; ${budget.periodCount} period(s)</p>
+<p><a href="/app/budgets/${escapeHtml(budget.guid)}">Open</a> &middot; <a href="/app/budgets/${escapeHtml(budget.guid)}/edit">Edit</a></p>
+</div>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "Budgets",
+        `<h1>Budgets</h1>
+<p class="muted">Budgeted vs. actual by account and period, like Actions → Budget.</p>
+<p><a href="/app/budgets/new" class="cta">New budget</a></p>
+${rows || `<p class="muted">No budgets yet.</p>`}`,
+      ),
+      200,
+    );
+  }
+
+  private async newBudgetPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const periodOptions = Object.entries(Book.PERIOD_TYPE_LABELS)
+      .filter(([type]) => type !== "once")
+      .map(
+        ([type, label]) =>
+          `<option value="${type}">Every N ${escapeHtml(label)}(s)</option>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "New budget",
+        `<h1>New budget</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/budgets">
+<label for="name">Name</label>
+<input id="name" name="name" type="text" required maxlength="200">
+<label for="description">Description (optional)</label>
+<input id="description" name="description" type="text" maxlength="200">
+<label for="start">First period starts</label>
+<input id="start" name="start" type="date" required value="${nowIso().slice(0, 10)}">
+<label for="period_type">Each period is</label>
+<select id="period_type" name="period_type">
+${periodOptions}
+</select>
+<label for="multiplier">Every N (e.g. 2 for "every 2 weeks")</label>
+<input id="multiplier" name="multiplier" type="number" min="1" value="1">
+<label for="weekend_adjust">If a period boundary falls on a weekend</label>
+<select id="weekend_adjust" name="weekend_adjust">
+<option value="none">Leave it</option>
+<option value="back">Move it earlier, to Friday</option>
+<option value="forward">Move it later, to Monday</option>
+</select>
+<label for="period_count">Number of periods</label>
+<input id="period_count" name="period_count" type="number" min="1" value="12">
+<button type="submit">Create budget</button>
+</form>
+<p><a href="/app/budgets">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async createBudgetRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    const description = formValue(body, "description");
+    const start = formValue(body, "start");
+
+    if (!name || name.length > 200) {
+      return this.newBudgetPage(c, "Enter a name.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+      return this.newBudgetPage(c, "Enter a valid start date.");
+    }
+    const periodType = formValue(body, "period_type") as PeriodType;
+    const periodTypes = Object.keys(Book.PERIOD_TYPE_LABELS).filter(
+      (type) => type !== "once",
+    );
+    if (!periodTypes.includes(periodType)) {
+      return this.newBudgetPage(c, "Choose how each period recurs.");
+    }
+    const multiplier = Number(formValue(body, "multiplier") || "1");
+    if (!Number.isInteger(multiplier) || multiplier < 1) {
+      return this.newBudgetPage(c, "Enter a whole number of 1 or more.");
+    }
+    const weekendAdjust = formValue(body, "weekend_adjust") as WeekendAdjust;
+    if (!["none", "back", "forward"].includes(weekendAdjust)) {
+      return this.newBudgetPage(c, "Choose a valid weekend adjustment.");
+    }
+    const periodCount = Number(formValue(body, "period_count") || "0");
+    if (!Number.isInteger(periodCount) || periodCount < 1) {
+      return this.newBudgetPage(c, "Enter a whole number of periods, 1 or more.");
+    }
+
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    try {
+      document.createBudget(
+        {
+          name,
+          description,
+          periodCount,
+          recurrence: { periodType, multiplier, start, weekendAdjust },
+        },
+        newGuid(),
+      );
+    } catch (error) {
+      return this.newBudgetPage(
+        c,
+        error instanceof Error ? error.message : "Could not create that budget.",
+      );
+    }
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/budgets");
+  }
+
+  private async editBudgetPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    const budget = document?.budget(guid);
+    if (!budget) return c.text("Budget not found", 404);
+    return c.html(
+      this.appPage(
+        "Edit budget",
+        `<h1>Edit budget</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<p class="muted">${escapeHtml(this.describeRecurrence(budget))}, starting ${escapeHtml(budget.recurrence.start)}. The recurrence can't be changed here -- delete this budget and create a new one instead.</p>
+<form method="post" action="/app/budgets/${escapeHtml(budget.guid)}/edit">
+<label for="name">Name</label>
+<input id="name" name="name" type="text" required maxlength="200" value="${escapeHtml(budget.name)}">
+<label for="description">Description (optional)</label>
+<input id="description" name="description" type="text" maxlength="200" value="${escapeHtml(budget.description)}">
+<label for="period_count">Number of periods</label>
+<input id="period_count" name="period_count" type="number" min="1" value="${budget.periodCount}">
+<button type="submit">Save</button>
+</form>
+<form method="post" action="/app/budgets/${escapeHtml(budget.guid)}/delete">
+<button type="submit" class="danger">Delete budget</button>
+</form>
+<p><a href="/app/budgets/${escapeHtml(budget.guid)}">Open grid</a> &middot; <a href="/app/budgets">Back</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async updateBudgetRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    if (!document?.budget(guid)) return c.text("Budget not found", 404);
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    if (!name || name.length > 200) {
+      return this.editBudgetPage(c, "Enter a name.");
+    }
+    const periodCount = Number(formValue(body, "period_count") || "0");
+    if (!Number.isInteger(periodCount) || periodCount < 1) {
+      return this.editBudgetPage(c, "Enter a whole number of periods, 1 or more.");
+    }
+    try {
+      document.updateBudget(guid, {
+        name,
+        description: formValue(body, "description"),
+        periodCount,
+      });
+    } catch (error) {
+      return this.editBudgetPage(
+        c,
+        error instanceof Error ? error.message : "Could not update that budget.",
+      );
+    }
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/budgets");
+  }
+
+  private async deleteBudgetRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (document) {
+      document.deleteBudget(c.req.param("guid") ?? "");
+      await this.store.save(bookId, document, nowIso());
+    }
+    return c.redirect("/app/budgets");
+  }
+
+  /** Accounts a budget grid shows: visible, non-placeholder, matching the scheduled-transaction split picker. */
+  private async budgetableAccountRows(bookId: string): Promise<AccountRow[]> {
+    const visible = await this.visibleAccountRows(bookId);
+    return visible.filter((row) => !row.placeholder && !row.hidden);
+  }
+
+  private async budgetGridPage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    const budget = document?.budget(guid);
+    if (!document || !budget) return c.text("Budget not found", 404);
+    const accounts = (await this.budgetableAccountRows(bookId)).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+    const periods = Array.from({ length: budget.periodCount }, (_, index) => index);
+
+    const headerCells = periods
+      .map(
+        (index) => `<th>${escapeHtml(document.periodRange(budget, index).start)}</th>`,
+      )
+      .join("");
+    const rows = accounts
+      .map((account) => {
+        const cells = periods
+          .map((index) => {
+            const budgeted = document.budgetAmount(budget.guid, account.guid, index);
+            const name = `amount-${account.guid}-${index}`;
+            return `<td><input name="${name}" inputmode="decimal" placeholder="0.00" style="width:6rem" value="${budgeted ? escapeHtml(formatMoney(budgeted, 100n)) : ""}"></td>`;
+          })
+          .join("");
+        const actualCells = periods
+          .map((index) => {
+            const actual = document.budgetActual(budget.guid, account.guid, index);
+            return `<td class="muted">${escapeHtml(formatMoney(actual, 100n))}</td>`;
+          })
+          .join("");
+        return `<tr><th>${escapeHtml(account.name)}</th>${cells}</tr>
+<tr><td class="muted">actual</td>${actualCells}</tr>`;
+      })
+      .join("");
+
+    return c.html(
+      this.appPage(
+        `Budget: ${budget.name}`,
+        `<h1>${escapeHtml(budget.name)}</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<p class="muted">${escapeHtml(this.describeRecurrence(budget))}. Enter a budgeted amount per account and period; leave blank to clear it. The "actual" row is computed live from posted transactions.</p>
+<form method="post" action="/app/budgets/${escapeHtml(budget.guid)}">
+<div style="overflow-x:auto">
+<table>
+<thead><tr><th>Account</th>${headerCells}</tr></thead>
+<tbody>${rows || `<tr><td class="muted">No budgetable accounts yet.</td></tr>`}</tbody>
+</table>
+</div>
+<button type="submit">Save amounts</button>
+</form>
+<p><a href="/app/budgets/${escapeHtml(budget.guid)}/edit">Edit budget</a> &middot; <a href="/app/budgets">Back</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async updateBudgetAmountsRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    const budget = document?.budget(guid);
+    if (!document || !budget) return c.text("Budget not found", 404);
+
+    const accounts = await this.budgetableAccountRows(bookId);
+    const body = await c.req.parseBody();
+    for (const account of accounts) {
+      for (let index = 0; index < budget.periodCount; index += 1) {
+        const raw = formValue(body, `amount-${account.guid}-${index}`).trim();
+        if (raw === "") {
+          document.setBudgetAmount(budget.guid, account.guid, index, null);
+          continue;
+        }
+        let value: Money;
+        try {
+          value = parseMoneyHalfUp(raw, 100n);
+        } catch {
+          return this.budgetGridPage(
+            c,
+            `"${raw}" isn't a valid amount for ${account.name}, period ${index}.`,
+          );
+        }
+        document.setBudgetAmount(budget.guid, account.guid, index, value);
+      }
+    }
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect(`/app/budgets/${guid}`);
+  }
+
   /**
    * Voids a transaction (GnuCash's "Void Transaction", not a delete): the
    * original splits are preserved for audit but zeroed, so the
@@ -2866,7 +3192,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       title,
       `<header class="appbar">
 <a class="brand" href="/app/books">Saldima</a>
-<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/scheduled">Scheduled</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/vault/setup">Vault</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/scheduled">Scheduled</a><a href="/app/budgets">Budgets</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/vault/setup">Vault</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
