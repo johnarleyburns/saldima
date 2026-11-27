@@ -465,6 +465,7 @@ export class Book {
       this.cancelTransactionImport(c),
     );
     app.get("/app/reports", (c) => this.reportsPage(c));
+    app.get("/app/vault/bundle-check", (c) => this.vaultBundleCheckPage(c));
     app.get("/app/help", (c) => this.helpPage(c));
     app.get("/app/journal", (c) => this.journalPage(c));
     app.get("/app/journal/new", (c) => this.newTransactionPage(c));
@@ -2450,6 +2451,29 @@ ${BOOK_CURRENCIES.map((code) => `<option value="${code}">${code}</option>`).join
 <p><a href="/app/settings/versions">Backups and version history</a></p>
 <p>Two-factor authentication is enabled.</p>
 <form method="post" action="/app/logout"><button type="submit">Sign out</button></form>`,
+      ),
+      200,
+    );
+  }
+
+  /**
+   * Plumbing-only check that the first-ever client-side JS bundle in this
+   * repo (`apps/web/src/client/vault.ts`, built by `pnpm build:client` into
+   * `apps/web/static/vault.js` and served by Workers Assets) actually
+   * loads and runs in a real browser. No vault logic lives here yet --
+   * see issue #88 for the real setup/encrypt/decrypt flow that replaces
+   * this page.
+   */
+  private async vaultBundleCheckPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    return c.html(
+      this.appPage(
+        "Vault bundle check",
+        `<h1>Vault bundle check</h1>
+<p>Client bundle status: <strong data-vault-bundle-status>pending</strong></p>
+<script type="module" src="/vault.js"></script>`,
       ),
       200,
     );

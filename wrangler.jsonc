@@ -7,6 +7,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": { "ENVIRONMENT": "local" },
+  "assets": { "directory": "apps/web/static", "binding": "ASSETS" },
   "kv_namespaces": [{ "binding": "KV", "id": "saldima-local-kv" }],
   "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-local-snapshots" }],
   "durable_objects": {
@@ -35,6 +36,7 @@
         { "pattern": "alice-dev.saldima.com", "custom_domain": true },
         { "pattern": "bob-dev.saldima.com", "custom_domain": true }
       ],
+      "assets": { "directory": "apps/web/static", "binding": "ASSETS" },
       "kv_namespaces": [{ "binding": "KV", "id": "354373cf643b456c8a58a8e69460bb2b" }],
       "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-dev-snapshots" }],
       "durable_objects": {
@@ -51,6 +53,7 @@
         { "pattern": "alice-stage.saldima.com", "custom_domain": true },
         { "pattern": "bob-stage.saldima.com", "custom_domain": true }
       ],
+      "assets": { "directory": "apps/web/static", "binding": "ASSETS" },
       "kv_namespaces": [{ "binding": "KV", "id": "673d280b3ced423f90282134a619e6f5" }],
       "r2_buckets": [{ "binding": "R2", "bucket_name": "saldima-staging-snapshots" }],
       "durable_objects": {
@@ -61,6 +64,7 @@
     "production": {
       "name": "saldima-production",
       "vars": { "ENVIRONMENT": "production" },
+      "assets": { "directory": "apps/web/static", "binding": "ASSETS" },
       "kv_namespaces": [{ "binding": "KV", "id": "REPLACE_WITH_PRODUCTION_KV_ID" }],
       "r2_buckets": [
         { "binding": "R2", "bucket_name": "saldima-production-snapshots" }

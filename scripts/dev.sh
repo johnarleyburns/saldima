@@ -8,4 +8,6 @@ if [ ! -f .dev.vars ]; then
     echo "dev: created .dev.vars from .dev.vars.example (local only)"
 fi
 
+pnpm build:client
+
 exec pnpm exec wrangler dev --ip :: "$@"

@@ -7,5 +7,7 @@ if [ ! -f .dev.vars ]; then
     cp .dev.vars.example .dev.vars
 fi
 
+pnpm build:client
+
 rm -rf .wrangler/e2e-state
 exec pnpm exec playwright test "$@"
