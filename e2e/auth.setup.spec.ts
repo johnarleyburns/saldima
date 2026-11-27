@@ -71,6 +71,13 @@ async function enrollTotp(page: Page): Promise<string> {
   return secret;
 }
 
+/** Nav links live behind a collapsed Menu toggle below the desktop breakpoint. */
+async function clickNavLink(page: Page, name: string): Promise<void> {
+  const toggle = page.locator(".nav-toggle-label");
+  if (await toggle.isVisible()) await toggle.click();
+  await page.getByRole("navigation").getByRole("link", { name }).click();
+}
+
 async function login(
   page: Page,
   testInfo: TestInfo,
@@ -102,7 +109,7 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   await page.getByRole("button", { name: "Enable two-factor" }).click();
   await expect(page.getByRole("heading", { name: "Books" })).toBeVisible();
 
-  await page.getByRole("link", { name: "Accounts" }).click();
+  await clickNavLink(page, "Accounts");
   await expect(page.getByText("Premium Trust")).toBeVisible();
   await page.getByRole("link", { name: "Add account" }).click();
   await page.getByLabel("Name").fill("Petty Cash");
@@ -121,11 +128,11 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
   await page.getByRole("button", { name: "Delete account" }).click();
   await expect(page.getByText("Petty Cash Box")).toHaveCount(0);
 
-  await page.getByRole("link", { name: "Settings" }).click();
+  await clickNavLink(page, "Settings");
   await expect(page.getByText(email)).toBeVisible();
   await expect(page.getByRole("link", { name: "Source code" })).toBeVisible();
 
-  await page.getByRole("link", { name: "Accounts" }).click();
+  await clickNavLink(page, "Accounts");
   await expect(page.getByText("Premium Trust")).toBeVisible();
   for (const width of [375, 768, 1280]) {
     await page.setViewportSize({ width, height: 900 });
@@ -137,7 +144,7 @@ test("alice: wrong setup token is refused, then owner setup, TOTP, sign-out and 
 
   await page.getByRole("link", { name: "Saldima" }).click();
   await expect(page.getByRole("heading", { name: "Books" })).toBeVisible();
-  await page.getByRole("link", { name: "Settings" }).click();
+  await clickNavLink(page, "Settings");
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 
@@ -157,7 +164,7 @@ test("bob: a separate owner can set up and reach his own book", async ({
   const email = `bob-${testInfo.project.name}@example.test`;
   await fillSetup(page, testInfo, "bob", email);
   await enrollTotp(page);
-  await page.getByRole("link", { name: "Settings" }).click();
+  await clickNavLink(page, "Settings");
   await expect(page.getByText(email)).toBeVisible();
   await expect(
     page.getByText(new RegExp(`alice-${testInfo.project.name}@example`)),
@@ -171,7 +178,7 @@ test("multi: companies can be created and switched without mixing charts", async
   await fillSetup(page, testInfo, "multi", email, SETUP_TOKEN, "personal");
   await enrollTotp(page);
 
-  await page.getByRole("navigation").getByRole("link", { name: "Books" }).click();
+  await clickNavLink(page, "Books");
   await expect(page.getByText("My book")).toBeVisible();
   await page.getByLabel("Company name").fill("Second Co");
   await page.getByLabel("Chart of accounts").selectOption("small-business");
@@ -184,7 +191,7 @@ test("multi: companies can be created and switched without mixing charts", async
   await expect(page.getByRole("link", { name: "Savings", exact: true })).toHaveCount(0);
   await expect(page.getByText("Second Co")).toBeVisible();
 
-  await page.getByRole("navigation").getByRole("link", { name: "Books" }).click();
+  await clickNavLink(page, "Books");
   const firstBook = page.locator("[data-book-id]").filter({ hasText: "My book" });
   await firstBook.getByRole("button", { name: "Select" }).click();
   await expect(page.getByRole("link", { name: "Savings", exact: true })).toBeVisible();
