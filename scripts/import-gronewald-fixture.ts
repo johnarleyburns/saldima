@@ -1,16 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Builds fixtures/books/gronewald-gl-2023-01.gnucash from the Gronewald et
-// al. synthetic general-ledger dataset (Data in Brief, 2026;
+// Builds fixtures/books/gronewald-gl-<month>.gnucash from the Gronewald et
+// al. synthetic general-ledger dataset ("DIB General Ledger Data", Jan
+// Gronewald, Sebastian Stephan, Alexander Rombach, Peter Fettke -- Saarland
+// University / DFKI; Zenodo record 22014653, v2, 2026-08-19;
 // https://doi.org/10.5281/zenodo.22014653, CC BY 4.0): a real, complex
-// chart of accounts and a month of balanced multi-leg journal entries, used
-// to exercise accounting end to end rather than a handful of toy fixtures.
+// chart of accounts and balanced multi-leg journal entries spanning
+// 2023-01 through 2024-12, used to exercise accounting end to end rather
+// than a handful of toy fixtures. Each generated file is one calendar
+// month's postings, standalone (not a cumulative, opening-balance-linked
+// series across months) -- matching how the existing fixture and its
+// consuming tests already treat it (imported into a fresh company).
 //
 // The source CSV is not committed (31 MB, third-party data); download it
 // first:
 //   curl -sL -o /tmp/gronewald/journal_entries_4203.csv \
 //     'https://zenodo.org/records/22014653/files/journal_entries_4203.csv?download=1'
-//   tsx scripts/import-gronewald-fixture.ts /tmp/gronewald/journal_entries_4203.csv
+//   tsx scripts/import-gronewald-fixture.ts /tmp/gronewald/journal_entries_4203.csv [YYYY-MM]
+//
+// YYYY-MM defaults to 2023-01 (the original fixture). The full dataset
+// covers 2023-01..2024-12.
 
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -28,8 +37,6 @@ import { money } from "../packages/gnucash/src/money.ts";
 import { writeGnuCashXml } from "../packages/gnucash/src/xml-writer.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const OUTPUT = join(ROOT, "fixtures", "books", "gronewald-gl-2023-01.gnucash");
-const MONTH = "2023-01";
 
 interface GlRow {
   readonly posting_id: string;
@@ -89,9 +96,9 @@ const ACCOUNT_TYPES: Record<string, AccountType> = {
   "8400": "INCOME",
 };
 
-function buildSnapshot(rows: readonly GlRow[]): BookSnapshot {
-  const bookGuid = guidFromSeed("gronewald-2023-01/book");
-  const rootGuid = guidFromSeed("gronewald-2023-01/root");
+function buildSnapshot(rows: readonly GlRow[], month: string): BookSnapshot {
+  const bookGuid = guidFromSeed(`gronewald-${month}/book`);
+  const rootGuid = guidFromSeed(`gronewald-${month}/root`);
 
   const codes = new Map<string, string>();
   for (const row of rows) codes.set(row.gl_account, row.gl_account_name);
@@ -112,7 +119,7 @@ function buildSnapshot(rows: readonly GlRow[]): BookSnapshot {
         const type = ACCOUNT_TYPES[code];
         if (!type) throw new Error(`unclassified GL account ${code} ${name}`);
         return {
-          guid: guidFromSeed(`gronewald-2023-01/account/${code}`),
+          guid: guidFromSeed(`gronewald-${month}/account/${code}`),
           name,
           type,
           parentGuid: rootGuid,
@@ -136,7 +143,7 @@ function buildSnapshot(rows: readonly GlRow[]): BookSnapshot {
       const first = splits[0];
       if (!first) throw new Error(`empty posting ${postingId}`);
       return {
-        guid: guidFromSeed(`gronewald-2023-01/transaction/${postingId}`),
+        guid: guidFromSeed(`gronewald-${month}/transaction/${postingId}`),
         date: first.document_date,
         description: first.text || `Posting ${postingId}`,
         currencyCode: "EUR",
@@ -144,8 +151,8 @@ function buildSnapshot(rows: readonly GlRow[]): BookSnapshot {
           const cents = BigInt(Math.round(Number.parseFloat(split.amount) * 100));
           const signed = split.cd_flag === "D" ? cents : -cents;
           return {
-            guid: guidFromSeed(`gronewald-2023-01/split/${postingId}/${index}`),
-            accountGuid: guidFromSeed(`gronewald-2023-01/account/${split.gl_account}`),
+            guid: guidFromSeed(`gronewald-${month}/split/${postingId}/${index}`),
+            accountGuid: guidFromSeed(`gronewald-${month}/account/${split.gl_account}`),
             value: money(signed, 100n),
           };
         }),
@@ -161,20 +168,30 @@ function buildSnapshot(rows: readonly GlRow[]): BookSnapshot {
   };
 }
 
+const MONTH_RE = /^\d{4}-\d{2}$/;
+
 function main(): void {
   const csvPath = process.argv[2];
+  const month = process.argv[3] ?? "2023-01";
   if (!csvPath) {
     console.error(
-      "usage: tsx scripts/import-gronewald-fixture.ts <path-to-journal_entries_4203.csv>",
+      "usage: tsx scripts/import-gronewald-fixture.ts <path-to-journal_entries_4203.csv> [YYYY-MM]",
     );
     process.exit(1);
   }
-  const text = readFileSync(csvPath, "utf8");
-  const rows = parseCsv(text).filter((row) => row.document_date.startsWith(MONTH));
-  if (rows.length === 0)
-    throw new Error(`no rows found for ${MONTH}; is this the right CSV?`);
+  if (!MONTH_RE.test(month)) {
+    throw new Error(`month must be YYYY-MM, got ${JSON.stringify(month)}`);
+  }
+  const output = join(ROOT, "fixtures", "books", `gronewald-gl-${month}.gnucash`);
 
-  const snapshot = buildSnapshot(rows);
+  const text = readFileSync(csvPath, "utf8");
+  const rows = parseCsv(text).filter((row) => row.document_date.startsWith(month));
+  if (rows.length === 0)
+    throw new Error(
+      `no rows found for ${month}; is this the right CSV, or an out-of-range month?`,
+    );
+
+  const snapshot = buildSnapshot(rows, month);
   const xml = writeGnuCashXml(snapshot);
 
   // Prove the file we are about to commit actually re-parses to the same shape.
@@ -185,9 +202,9 @@ function main(): void {
     );
   }
 
-  writeFileSync(OUTPUT, gzipSync(Buffer.from(xml, "utf8")));
+  writeFileSync(output, gzipSync(Buffer.from(xml, "utf8")));
   console.log(
-    `wrote ${OUTPUT}: ${snapshot.accounts.length - 1} accounts, ${snapshot.transactions.length} transactions, ${rows.length} splits (${MONTH})`,
+    `wrote ${output}: ${snapshot.accounts.length - 1} accounts, ${snapshot.transactions.length} transactions, ${rows.length} splits (${month})`,
   );
 }
 
