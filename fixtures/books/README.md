@@ -84,11 +84,11 @@ addition -- every file here was also actually opened and re-saved by the
 real GnuCash engine (`python3-gnucash`) as an external oracle, with zero
 errors, the same bar `oracle-mini.*` and `fa-001-*` above already meet.
 
-| File                         | Month   | Accounts | Transactions | SHA-256 |
-| ----------------------------- | ------- | -------: | ------------: | ------- |
-| `gronewald-gl-2023-01.gnucash` | 2023-01 | 22 | 3,305 | `d22e60590536ed28410d8199f69a19f050ab6ff4d507140fd89e407222770a0b` |
-| `gronewald-gl-2023-07.gnucash` | 2023-07 | 21 | 5,620 | `59561e1347319086537d93fbca5d0d423cbca7d81d110d35844e5ea58a27c1a0` |
-| `gronewald-gl-2024-12.gnucash` | 2024-12 | 21 | 2,429 | `df1cef1fa55083014ba01c8840ef4aa13a6e7a9a8b69cc9756d1dcdb21fe1011` |
+| File                           | Month   | Accounts | Transactions | SHA-256                                                            |
+| ------------------------------ | ------- | -------: | -----------: | ------------------------------------------------------------------ |
+| `gronewald-gl-2023-01.gnucash` | 2023-01 |       22 |        3,305 | `d22e60590536ed28410d8199f69a19f050ab6ff4d507140fd89e407222770a0b` |
+| `gronewald-gl-2023-07.gnucash` | 2023-07 |       21 |        5,620 | `59561e1347319086537d93fbca5d0d423cbca7d81d110d35844e5ea58a27c1a0` |
+| `gronewald-gl-2024-12.gnucash` | 2024-12 |       21 |        2,429 | `df1cef1fa55083014ba01c8840ef4aa13a6e7a9a8b69cc9756d1dcdb21fe1011` |
 
 Three non-adjacent months (first, a mid-year month of the same year, and
 the dataset's final month) were picked deliberately for temporal spread
