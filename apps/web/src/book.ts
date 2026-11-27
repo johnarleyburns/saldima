@@ -2,18 +2,24 @@
 import {
   addMoney,
   type BookSnapshot,
+  type DueScheduledInstance,
   equalsMoney,
   formatMoney,
+  type GncXmlDocument,
   isZeroMoney,
   type Money,
   money,
   multiplyMoney,
   negateMoney,
   newGuid,
+  nextInstance,
+  type PeriodType,
   parseMoneyHalfUp,
   readBookSnapshot,
+  type WeekendAdjust,
   type XmlAccount,
   type XmlCustomer,
+  type XmlScheduledTransaction,
   type XmlSplit,
   type XmlTransaction,
   type XmlVendor,
@@ -480,6 +486,20 @@ export class Book {
     app.post("/app/journal", (c) => this.createTransaction(c));
     app.post("/app/journal/:guid/void", (c) => this.voidTransactionRoute(c));
     app.post("/app/journal/:guid/unvoid", (c) => this.unvoidTransactionRoute(c));
+    app.get("/app/scheduled", (c) => this.scheduledTransactionsPage(c));
+    app.get("/app/scheduled/new", (c) => this.newScheduledTransactionPage(c));
+    app.post("/app/scheduled", (c) => this.createScheduledTransactionRoute(c));
+    app.get("/app/scheduled/:guid/edit", (c) => this.editScheduledTransactionPage(c));
+    app.post("/app/scheduled/:guid/edit", (c) =>
+      this.updateScheduledTransactionRoute(c),
+    );
+    app.post("/app/scheduled/:guid/delete", (c) =>
+      this.deleteScheduledTransactionRoute(c),
+    );
+    app.post("/app/scheduled/:guid/approve", (c) =>
+      this.approveScheduledInstanceRoute(c),
+    );
+    app.post("/app/scheduled/:guid/skip", (c) => this.skipScheduledInstanceRoute(c));
     app.get("/app/security/totp", (c) => this.totpPage(c));
     app.post("/app/security/totp", (c) => this.totp(c));
     return app;
@@ -2083,12 +2103,54 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
     );
   }
 
+  /**
+   * Scheduled transactions, "check on open": whenever the journal loads,
+   * compute everything due. `autoPost`/`autoPostNotify` instances post
+   * immediately and silently (notify ones are still listed below, for
+   * visibility); `needsApproval`/`reminder` ones are returned for the
+   * page to render as a review banner the owner acts on by hand. This
+   * never runs on a schedule or in the background -- only when a human
+   * opens this page.
+   */
+  private async processDueScheduledTransactions(
+    document: GncXmlDocument,
+    bookId: string,
+  ): Promise<{ autoPosted: number; review: DueScheduledInstance[] }> {
+    const today = nowIso().slice(0, 10);
+    const due = document.dueScheduledInstances(today);
+    let autoPosted = 0;
+    const review: DueScheduledInstance[] = [];
+    for (const instance of due) {
+      if (instance.action === "autoPost" || instance.action === "autoPostNotify") {
+        const sx = document.scheduledTransaction(instance.scheduledTransactionGuid);
+        if (!sx) continue;
+        document.postScheduledInstance(
+          instance.scheduledTransactionGuid,
+          instance.date,
+          {
+            transaction: newGuid(),
+            splits: sx.templateSplits.map(() => newGuid()),
+          },
+        );
+        autoPosted += 1;
+        if (instance.action === "autoPostNotify") review.push(instance);
+      } else {
+        review.push(instance);
+      }
+    }
+    if (autoPosted > 0) await this.store.save(bookId, document, nowIso());
+    return { autoPosted, review };
+  }
+
   private async journalPage(c: BookContext): Promise<Response> {
     const session = await this.currentSession(c);
     if (!session) return c.redirect("/app/login");
     if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
     const bookId = c.get("bookId");
     const document = await this.store.get(bookId);
+    const due = document
+      ? await this.processDueScheduledTransactions(document, bookId)
+      : { autoPosted: 0, review: [] };
     const accounts = new Map(
       (document?.accounts() ?? []).map((row) => [row.guid, row.name]),
     );
@@ -2128,12 +2190,39 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
         return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}${tx.voided ? ` <span class="chip">VOID</span>` : ""}</h2><p class="muted">${escapeHtml(tx.datePosted.slice(0, 10))}</p><ul class="journal">${rows}</ul>${voidControls}</div>`;
       })
       .join("");
+    const reviewBanner = due.review.length
+      ? `<div class="card" style="margin-bottom:1rem">
+<h2 style="margin-top:0">Scheduled transactions due${due.autoPosted ? ` (${due.autoPosted} posted automatically)` : ""}</h2>
+${due.review
+  .map(
+    (
+      instance,
+    ) => `<p class="muted">${escapeHtml(instance.name)} -- ${escapeHtml(instance.date)}${instance.action === "reminder" ? " (upcoming)" : ""}${instance.action === "autoPostNotify" ? " (posted automatically)" : ""}</p>
+${
+  instance.action === "needsApproval"
+    ? `<form method="post" action="/app/scheduled/${escapeHtml(instance.scheduledTransactionGuid)}/approve" style="display:inline">
+<input type="hidden" name="date" value="${escapeHtml(instance.date)}">
+<button type="submit" class="secondary">Approve</button>
+</form>
+<form method="post" action="/app/scheduled/${escapeHtml(instance.scheduledTransactionGuid)}/skip" style="display:inline">
+<input type="hidden" name="date" value="${escapeHtml(instance.date)}">
+<button type="submit" class="secondary">Skip</button>
+</form>`
+    : ""
+}`,
+  )
+  .join("")}
+</div>`
+      : due.autoPosted
+        ? `<p class="muted">${due.autoPosted} scheduled transaction${due.autoPosted === 1 ? "" : "s"} posted automatically.</p>`
+        : "";
     return c.html(
       this.appPage(
         "General Journal",
         `<h1>General Journal</h1>
 <p class="muted">Every transaction in this book, like Tools → General Journal.</p>
-<p><a href="/app/journal/new" class="cta">New transaction</a></p>
+<p><a href="/app/journal/new" class="cta">New transaction</a> · <a href="/app/scheduled">Scheduled transactions</a></p>
+${reviewBanner}
 <form method="get" action="/app/journal" class="card" style="margin-bottom:1rem">
 <label for="journal-search">Find transactions</label>
 <input id="journal-search" name="q" type="text" placeholder="Description, memo or account" value="${escapeHtml(query)}">
@@ -2267,6 +2356,406 @@ ${rows}
     return c.redirect("/app/journal");
   }
 
+  private static readonly PERIOD_TYPE_LABELS: Record<PeriodType, string> = {
+    once: "once",
+    day: "day",
+    week: "week",
+    month: "month",
+    end_of_month: "month, on the last day",
+    nth_weekday: "month, same weekday",
+    last_weekday: "month, last weekday",
+    year: "year",
+  };
+
+  private describeRecurrence(sx: XmlScheduledTransaction): string {
+    const { multiplier, periodType } = sx.recurrence;
+    const label = Book.PERIOD_TYPE_LABELS[periodType];
+    if (periodType === "once") return "Once";
+    return multiplier > 1 ? `Every ${multiplier} ${label}s` : `Every ${label}`;
+  }
+
+  private nextDueDate(sx: XmlScheduledTransaction): string | null {
+    return nextInstance(sx.recurrence, sx.lastOccurred ?? "0001-01-01");
+  }
+
+  private async scheduledTransactionsPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const schedules = (document?.scheduledTransactions() ?? []).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+    const rows = schedules
+      .map((sx) => {
+        const next = this.nextDueDate(sx);
+        return `<div class="card" style="margin-bottom:1rem">
+<h2 style="margin:0">${escapeHtml(sx.name)}${sx.enabled ? "" : ` <span class="chip">Disabled</span>`}</h2>
+<p class="muted">${escapeHtml(this.describeRecurrence(sx))} · next due ${next ? escapeHtml(next) : "never again"}</p>
+<p><a href="/app/scheduled/${escapeHtml(sx.guid)}/edit">Edit</a></p>
+</div>`;
+      })
+      .join("");
+    return c.html(
+      this.appPage(
+        "Scheduled transactions",
+        `<h1>Scheduled transactions</h1>
+<p class="muted">Recurring bills, invoices and transfers, like Actions → Scheduled Transactions. Due instances are checked whenever you open the <a href="/app/journal">journal</a>.</p>
+<p><a href="/app/scheduled/new" class="cta">New scheduled transaction</a></p>
+${rows || `<p class="muted">No scheduled transactions yet.</p>`}`,
+      ),
+      200,
+    );
+  }
+
+  private async newScheduledTransactionPage(
+    c: BookContext,
+    error = "",
+  ): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const visible = await this.visibleAccountRows(c.get("bookId"));
+    const options = visible
+      .filter((row) => !row.placeholder && !row.hidden)
+      .map(
+        (row) =>
+          `<option value="${escapeHtml(row.guid)}">${escapeHtml(row.name)}</option>`,
+      )
+      .join("");
+    const rows = Array.from(
+      { length: Book.SPLIT_ROWS },
+      (_, index) => `<label for="split-account-${index}">${
+        index < 2 ? "Account" : "Account (optional)"
+      }</label>
+<select id="split-account-${index}" name="split-account-${index}"${index < 2 ? " required" : ""}>
+<option value=""></option>
+${options}
+</select>
+<label for="split-amount-${index}">Amount${index >= 2 ? " (optional)" : ""}</label>
+<input id="split-amount-${index}" name="split-amount-${index}" inputmode="decimal"${index < 2 ? " required" : ""} placeholder="12.34 or -12.34">`,
+    ).join("\n");
+    const periodOptions = Object.entries(Book.PERIOD_TYPE_LABELS)
+      .filter(([type]) => type !== "once")
+      .map(
+        ([type, label]) =>
+          `<option value="${type}">Every N ${escapeHtml(label)}(s)</option>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "New scheduled transaction",
+        `<h1>New scheduled transaction</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<p class="muted">Each split takes a signed amount; the splits used must sum to zero.</p>
+<form method="post" action="/app/scheduled">
+<label for="name">Name</label>
+<input id="name" name="name" type="text" required maxlength="200">
+<label for="description">Description (used on every posted transaction)</label>
+<input id="description" name="description" type="text" required maxlength="200">
+<label for="start">First due date</label>
+<input id="start" name="start" type="date" required value="${nowIso().slice(0, 10)}">
+<label for="period_type">Recurs</label>
+<select id="period_type" name="period_type">
+<option value="once">Once, on the first due date only</option>
+${periodOptions}
+</select>
+<label for="multiplier">Every N (e.g. 2 for "every 2 weeks")</label>
+<input id="multiplier" name="multiplier" type="number" min="1" value="1">
+<label for="weekend_adjust">If it falls on a weekend</label>
+<select id="weekend_adjust" name="weekend_adjust">
+<option value="none">Leave it</option>
+<option value="back">Move it earlier, to Friday</option>
+<option value="forward">Move it later, to Monday</option>
+</select>
+<label for="end_type">Ends</label>
+<select id="end_type" name="end_type">
+<option value="none">Never</option>
+<option value="occurrences">After a number of times</option>
+<option value="date">On a date</option>
+</select>
+<label for="end_occurrences">Number of times (if "After a number of times")</label>
+<input id="end_occurrences" name="end_occurrences" type="number" min="1">
+<label for="end_date">End date (if "On a date")</label>
+<input id="end_date" name="end_date" type="date">
+<label><input type="checkbox" name="auto_create" value="y"> Post automatically when due</label>
+<label><input type="checkbox" name="auto_create_notify" value="y"> Still show it for review when posted automatically</label>
+<label for="advance_create_days">Create this many days before it's due</label>
+<input id="advance_create_days" name="advance_create_days" type="number" min="0" value="0">
+<label for="advance_remind_days">Show as an upcoming reminder this many days before that</label>
+<input id="advance_remind_days" name="advance_remind_days" type="number" min="0" value="0">
+${rows}
+<button type="submit">Create scheduled transaction</button>
+</form>
+<p><a href="/app/scheduled">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async createScheduledTransactionRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    const description = formValue(body, "description");
+    const start = formValue(body, "start");
+    const bookId = c.get("bookId");
+    const visibleRows = await this.visibleAccountRows(bookId);
+    const accounts = new Set(visibleRows.map((row) => row.guid));
+
+    if (!name || name.length > 200) {
+      return this.newScheduledTransactionPage(c, "Enter a name.");
+    }
+    if (!description || description.length > 200) {
+      return this.newScheduledTransactionPage(c, "Enter a description.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+      return this.newScheduledTransactionPage(c, "Enter a valid first due date.");
+    }
+
+    const periodType = formValue(body, "period_type") as PeriodType;
+    const periodTypes = Object.keys(Book.PERIOD_TYPE_LABELS);
+    if (!periodTypes.includes(periodType)) {
+      return this.newScheduledTransactionPage(c, "Choose how it recurs.");
+    }
+    const multiplier = Number(formValue(body, "multiplier") || "1");
+    if (!Number.isInteger(multiplier) || multiplier < 1) {
+      return this.newScheduledTransactionPage(c, "Enter a whole number of 1 or more.");
+    }
+    const weekendAdjust = formValue(body, "weekend_adjust") as WeekendAdjust;
+    if (!["none", "back", "forward"].includes(weekendAdjust)) {
+      return this.newScheduledTransactionPage(c, "Choose a valid weekend adjustment.");
+    }
+
+    const endType = formValue(body, "end_type");
+    let end: { occurrences: number } | { date: string } | undefined;
+    if (endType === "occurrences") {
+      const occurrences = Number(formValue(body, "end_occurrences"));
+      if (!Number.isInteger(occurrences) || occurrences < 1) {
+        return this.newScheduledTransactionPage(
+          c,
+          "Enter how many times it should occur.",
+        );
+      }
+      end = { occurrences };
+    } else if (endType === "date") {
+      const endDate = formValue(body, "end_date");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+        return this.newScheduledTransactionPage(c, "Enter a valid end date.");
+      }
+      end = { date: endDate };
+    }
+
+    const splits: Array<{ accountGuid: string; value: Money }> = [];
+    for (let index = 0; index < Book.SPLIT_ROWS; index += 1) {
+      const account = formValue(body, `split-account-${index}`);
+      const amountText = formValue(body, `split-amount-${index}`);
+      if (!account && !amountText) continue;
+      if (!accounts.has(account)) {
+        return this.newScheduledTransactionPage(
+          c,
+          "Choose a valid account for every split used.",
+        );
+      }
+      let value: Money;
+      try {
+        value = parseMoneyHalfUp(amountText, 100n);
+      } catch {
+        return this.newScheduledTransactionPage(
+          c,
+          "Enter amounts like 12.34 or -12.34.",
+        );
+      }
+      if (equalsMoney(value, money(0n))) {
+        return this.newScheduledTransactionPage(
+          c,
+          "A split's amount must not be zero.",
+        );
+      }
+      splits.push({ accountGuid: account, value });
+    }
+    if (splits.length < 2) {
+      return this.newScheduledTransactionPage(c, "Use at least two splits.");
+    }
+    const total = splits.reduce((sum, split) => addMoney(sum, split.value), money(0n));
+    if (!equalsMoney(total, money(0n))) {
+      return this.newScheduledTransactionPage(c, "The splits must sum to zero.");
+    }
+
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    const currency = this.bookById(bookId)?.currency ?? "USD";
+    try {
+      document.createScheduledTransaction(
+        {
+          name,
+          description,
+          currency: { space: "CURRENCY", id: currency },
+          enabled: true,
+          autoCreate: formValue(body, "auto_create") === "y",
+          autoCreateNotify: formValue(body, "auto_create_notify") === "y",
+          advanceCreateDays: Number(formValue(body, "advance_create_days") || "0"),
+          advanceRemindDays: Number(formValue(body, "advance_remind_days") || "0"),
+          start,
+          recurrence: { periodType, multiplier, start, weekendAdjust },
+          templateSplits: splits,
+          ...(end ? { end } : {}),
+        },
+        {
+          scheduledTransaction: newGuid(),
+          templateAccount: newGuid(),
+          templateTransaction: newGuid(),
+          templateSplits: splits.map(() => newGuid()),
+          // Ignored by the engine if a Template Root already exists for
+          // this book -- only used the very first time any schedule is made.
+          templateRoot: newGuid(),
+        },
+      );
+    } catch (error) {
+      return this.newScheduledTransactionPage(
+        c,
+        error instanceof Error ? error.message : "Could not create that schedule.",
+      );
+    }
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/scheduled");
+  }
+
+  private async editScheduledTransactionPage(
+    c: BookContext,
+    error = "",
+  ): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    const sx = document?.scheduledTransaction(guid);
+    if (!sx) return c.text("Scheduled transaction not found", 404);
+    return c.html(
+      this.appPage(
+        "Edit scheduled transaction",
+        `<h1>Edit scheduled transaction</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<p class="muted">${escapeHtml(this.describeRecurrence(sx))}, starting ${escapeHtml(sx.start)}. The recurrence and splits can't be changed here -- delete this schedule and create a new one instead.</p>
+<form method="post" action="/app/scheduled/${escapeHtml(sx.guid)}/edit">
+<label for="name">Name</label>
+<input id="name" name="name" type="text" required maxlength="200" value="${escapeHtml(sx.name)}">
+<label><input type="checkbox" name="enabled" value="y"${sx.enabled ? " checked" : ""}> Enabled</label>
+<label><input type="checkbox" name="auto_create" value="y"${sx.autoCreate ? " checked" : ""}> Post automatically when due</label>
+<label><input type="checkbox" name="auto_create_notify" value="y"${sx.autoCreateNotify ? " checked" : ""}> Still show it for review when posted automatically</label>
+<label for="advance_create_days">Create this many days before it's due</label>
+<input id="advance_create_days" name="advance_create_days" type="number" min="0" value="${sx.advanceCreateDays}">
+<label for="advance_remind_days">Show as an upcoming reminder this many days before that</label>
+<input id="advance_remind_days" name="advance_remind_days" type="number" min="0" value="${sx.advanceRemindDays}">
+<button type="submit">Save</button>
+</form>
+<form method="post" action="/app/scheduled/${escapeHtml(sx.guid)}/delete">
+<button type="submit" class="danger">Delete scheduled transaction</button>
+</form>
+<p><a href="/app/scheduled">Back</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async updateScheduledTransactionRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    if (!document?.scheduledTransaction(guid)) {
+      return c.text("Scheduled transaction not found", 404);
+    }
+    const body = await c.req.parseBody();
+    const name = formValue(body, "name");
+    if (!name || name.length > 200) {
+      return this.editScheduledTransactionPage(c, "Enter a name.");
+    }
+    document.updateScheduledTransaction(guid, {
+      name,
+      enabled: formValue(body, "enabled") === "y",
+      autoCreate: formValue(body, "auto_create") === "y",
+      autoCreateNotify: formValue(body, "auto_create_notify") === "y",
+      advanceCreateDays: Number(formValue(body, "advance_create_days") || "0"),
+      advanceRemindDays: Number(formValue(body, "advance_remind_days") || "0"),
+    });
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/scheduled");
+  }
+
+  private async deleteScheduledTransactionRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (document) {
+      document.deleteScheduledTransaction(c.req.param("guid") ?? "");
+      await this.store.save(bookId, document, nowIso());
+    }
+    return c.redirect("/app/scheduled");
+  }
+
+  /**
+   * A `needsApproval` due instance from the journal's review banner:
+   * posts it the same way an auto-created instance would be.
+   */
+  private async approveScheduledInstanceRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    const sx = document?.scheduledTransaction(guid);
+    if (document && sx) {
+      const body = await c.req.parseBody();
+      const date = formValue(body, "date");
+      try {
+        document.postScheduledInstance(guid, date, {
+          transaction: newGuid(),
+          splits: sx.templateSplits.map(() => newGuid()),
+        });
+        await this.store.save(bookId, document, nowIso());
+      } catch {
+        // Already posted or no longer due -- nothing to do.
+      }
+    }
+    return c.redirect("/app/journal");
+  }
+
+  private async skipScheduledInstanceRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    if (document) {
+      const body = await c.req.parseBody();
+      const date = formValue(body, "date");
+      try {
+        document.skipScheduledInstance(guid, date);
+        await this.store.save(bookId, document, nowIso());
+      } catch {
+        // Unknown or already-advanced -- nothing to do.
+      }
+    }
+    return c.redirect("/app/journal");
+  }
+
   /**
    * Voids a transaction (GnuCash's "Void Transaction", not a delete): the
    * original splits are preserved for audit but zeroed, so the
@@ -2377,7 +2866,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       title,
       `<header class="appbar">
 <a class="brand" href="/app/books">Saldima</a>
-<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/vault/setup">Vault</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
+<nav><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/scheduled">Scheduled</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/vault/setup">Vault</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,
