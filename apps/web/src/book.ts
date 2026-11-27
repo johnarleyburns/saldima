@@ -20,6 +20,7 @@ import {
   type WeekendAdjust,
   type XmlAccount,
   type XmlCustomer,
+  type XmlPrice,
   type XmlScheduledTransaction,
   type XmlSplit,
   type XmlTransaction,
@@ -509,6 +510,14 @@ export class Book {
     app.post("/app/budgets/:guid/delete", (c) => this.deleteBudgetRoute(c));
     app.get("/app/budgets/:guid", (c) => this.budgetGridPage(c));
     app.post("/app/budgets/:guid", (c) => this.updateBudgetAmountsRoute(c));
+    app.get("/app/prices", (c) => this.pricesPage(c));
+    app.get("/app/prices/new", (c) => this.newPricePage(c));
+    app.post("/app/prices", (c) => this.createPriceRoute(c));
+    app.get("/app/prices/:guid/edit", (c) =>
+      this.editPricePage(c, c.req.param("guid") ?? ""),
+    );
+    app.post("/app/prices/:guid/edit", (c) => this.updatePriceRoute(c));
+    app.post("/app/prices/:guid/delete", (c) => this.deletePriceRoute(c));
     app.get("/app/security/totp", (c) => this.totpPage(c));
     app.post("/app/security/totp", (c) => this.totp(c));
     return app;
@@ -3082,6 +3091,207 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
     return c.redirect(`/app/budgets/${guid}`);
   }
 
+  private async pricesPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const prices = (document?.prices() ?? []).sort((left, right) =>
+      right.time.localeCompare(left.time),
+    );
+    const rows = prices
+      .map(
+        (price) => `<tr>
+<td>${escapeHtml(price.commodity.id)}</td>
+<td>${escapeHtml(price.currency.id)}</td>
+<td>${escapeHtml(price.time.slice(0, 10))}</td>
+<td>${escapeHtml(formatMoney(price.value, 100n))}</td>
+<td><a href="/app/prices/${escapeHtml(price.guid)}/edit">Edit</a></td>
+</tr>`,
+      )
+      .join("");
+    return c.html(
+      this.appPage(
+        "Prices",
+        `<h1>Prices</h1>
+<p class="muted">Manual exchange rates and security prices, like Actions &rarr; Price Editor.</p>
+<p><a href="/app/prices/new" class="cta">New price</a></p>
+${
+  prices.length
+    ? `<table><thead><tr><th>Commodity</th><th>Currency</th><th>Date</th><th>Value</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<p class="muted">No prices yet.</p>`
+}`,
+      ),
+      200,
+    );
+  }
+
+  private priceFormFields(price?: XmlPrice, defaultCurrency = "USD"): string {
+    return `<label for="commodity_space">Commodity space</label>
+<input id="commodity_space" name="commodity_space" type="text" required maxlength="40" value="${escapeHtml(price?.commodity.space ?? "CURRENCY")}">
+<label for="commodity_id">Commodity (e.g. EUR, AAPL)</label>
+<input id="commodity_id" name="commodity_id" type="text" required maxlength="40" value="${escapeHtml(price?.commodity.id ?? "")}">
+<label for="currency_space">Currency space</label>
+<input id="currency_space" name="currency_space" type="text" required maxlength="40" value="${escapeHtml(price?.currency.space ?? "CURRENCY")}">
+<label for="currency_id">Currency</label>
+<input id="currency_id" name="currency_id" type="text" required maxlength="40" value="${escapeHtml(price?.currency.id ?? defaultCurrency)}">
+<label for="date">Date</label>
+<input id="date" name="date" type="date" required value="${escapeHtml(price?.time.slice(0, 10) ?? nowIso().slice(0, 10))}">
+<label for="type">Type (optional)</label>
+<input id="type" name="type" type="text" maxlength="40" value="${escapeHtml(price?.type ?? "")}">
+<label for="value">Value (how much currency per unit of commodity)</label>
+<input id="value" name="value" inputmode="decimal" required placeholder="1.08" value="${escapeHtml(price ? formatMoney(price.value, 100n) : "")}">`;
+  }
+
+  private async newPricePage(c: BookContext, error = ""): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const defaultCurrency = this.bookById(bookId)?.currency ?? "USD";
+    return c.html(
+      this.appPage(
+        "New price",
+        `<h1>New price</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<form method="post" action="/app/prices">
+${this.priceFormFields(undefined, defaultCurrency)}
+<button type="submit">Create price</button>
+</form>
+<p><a href="/app/prices">Cancel</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async createPriceRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const body = await c.req.parseBody();
+    const commoditySpace = formValue(body, "commodity_space");
+    const commodityId = formValue(body, "commodity_id");
+    const currencySpace = formValue(body, "currency_space");
+    const currencyId = formValue(body, "currency_id");
+    const date = formValue(body, "date");
+    const type = formValue(body, "type");
+    const valueText = formValue(body, "value");
+
+    if (!commoditySpace || !commodityId) {
+      return this.newPricePage(c, "Enter the commodity.");
+    }
+    if (!currencySpace || !currencyId) {
+      return this.newPricePage(c, "Enter the currency.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return this.newPricePage(c, "Enter a valid date.");
+    }
+    let value: Money;
+    try {
+      value = parseMoneyHalfUp(valueText, 100n);
+    } catch {
+      return this.newPricePage(c, "Enter a valid value like 1.08.");
+    }
+
+    const document = await this.store.get(bookId);
+    if (!document) return c.text("Book not found", 404);
+    document.createPrice(
+      {
+        commodity: { space: commoditySpace, id: commodityId },
+        currency: { space: currencySpace, id: currencyId },
+        time: `${date} 00:00:00 +0000`,
+        ...(type ? { type } : {}),
+        value,
+      },
+      newGuid(),
+    );
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/prices");
+  }
+
+  private async editPricePage(
+    c: BookContext,
+    guid: string,
+    error = "",
+  ): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const price = document?.price(guid);
+    if (!price) return c.text("Price not found", 404);
+    return c.html(
+      this.appPage(
+        "Edit price",
+        `<h1>Edit price</h1>
+${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+<p class="muted">${escapeHtml(price.commodity.id)} in ${escapeHtml(price.currency.id)} -- the commodity and currency can't be changed here; delete this price and create a new one instead.</p>
+<form method="post" action="/app/prices/${escapeHtml(price.guid)}/edit">
+<label for="date">Date</label>
+<input id="date" name="date" type="date" required value="${escapeHtml(price.time.slice(0, 10))}">
+<label for="type">Type (optional)</label>
+<input id="type" name="type" type="text" maxlength="40" value="${escapeHtml(price.type)}">
+<label for="value">Value</label>
+<input id="value" name="value" inputmode="decimal" required value="${escapeHtml(formatMoney(price.value, 100n))}">
+<button type="submit">Save</button>
+</form>
+<form method="post" action="/app/prices/${escapeHtml(price.guid)}/delete">
+<button type="submit" class="danger">Delete price</button>
+</form>
+<p><a href="/app/prices">Back</a></p>`,
+      ),
+      200,
+    );
+  }
+
+  private async updatePriceRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    if (!document?.price(guid)) return c.text("Price not found", 404);
+    const body = await c.req.parseBody();
+    const date = formValue(body, "date");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return this.editPricePage(c, guid, "Enter a valid date.");
+    }
+    const valueText = formValue(body, "value");
+    let value: Money;
+    try {
+      value = parseMoneyHalfUp(valueText, 100n);
+    } catch {
+      return this.editPricePage(c, guid, "Enter a valid value like 1.08.");
+    }
+    document.updatePrice(guid, {
+      time: `${date} 00:00:00 +0000`,
+      type: formValue(body, "type"),
+      value,
+    });
+    await this.store.save(bookId, document, nowIso());
+    return c.redirect("/app/prices");
+  }
+
+  private async deletePriceRoute(c: BookContext): Promise<Response> {
+    if (!isSameOrigin(c.req.raw)) return c.text("Forbidden", 403);
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    if (document) {
+      document.deletePrice(c.req.param("guid") ?? "");
+      await this.store.save(bookId, document, nowIso());
+    }
+    return c.redirect("/app/prices");
+  }
+
   /**
    * Voids a transaction (GnuCash's "Void Transaction", not a delete): the
    * original splits are preserved for audit but zeroed, so the
@@ -3194,7 +3404,7 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
 <a class="brand" href="/app/books">Saldima</a>
 <input type="checkbox" id="nav-toggle" class="nav-toggle-checkbox">
 <label for="nav-toggle" class="nav-toggle-label"><span>Menu</span></label>
-<nav class="nav-panel"><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/scheduled">Scheduled</a><a href="/app/budgets">Budgets</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/vault/setup">Vault</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
+<nav class="nav-panel"><a href="/app/accounts">Accounts</a><a href="/app/journal">Journal</a><a href="/app/scheduled">Scheduled</a><a href="/app/budgets">Budgets</a><a href="/app/prices">Prices</a><a href="/app/invoices">Invoices</a><a href="/app/bills">Bills</a><a href="/app/receipts">Receipts</a><a href="/app/reports">Reports</a><a href="/app/vault/setup">Vault</a><a href="/app/books">Books</a><a href="/app/help">Help</a><a href="/app/settings">Settings</a></nav>
 </header>
 ${body}
 <footer class="appfoot"><a href="https://github.com/johnarleyburns/saldima">Source code</a> · AGPL-3.0-only</footer>`,

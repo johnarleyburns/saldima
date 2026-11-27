@@ -160,6 +160,15 @@ export function addDays(date: string, days: number): string {
   return formatIso(civilFromDays(daysFromCivil(parts.y, parts.m, parts.d) + days));
 }
 
+/** Absolute number of days between two `YYYY-MM-DD` dates, order-independent. */
+export function daysBetween(a: string, b: string): number {
+  const left = parseIso(a);
+  const right = parseIso(b);
+  const leftDays = daysFromCivil(left.y, left.m, left.d);
+  const rightDays = daysFromCivil(right.y, right.m, right.d);
+  return Math.abs(rightDays - leftDays);
+}
+
 function applyWeekendAdjust(parts: DateParts, adjust: WeekendAdjust): DateParts {
   if (adjust === "none") return parts;
   const weekday = dayOfWeek(parts);

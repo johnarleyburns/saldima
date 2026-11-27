@@ -1351,6 +1351,380 @@ describe("GncXmlDocument", () => {
     });
   });
 
+  describe("prices", () => {
+    const EUR = { space: "CURRENCY", id: "EUR" };
+    const AAPL = { space: "NASDAQ", id: "AAPL" };
+
+    it("creates a price matching real GnuCash's on-disk shape, and reads it back", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const price = doc.createPrice(
+        {
+          commodity: EUR,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          value: money(108n, 100n),
+        },
+        guidFrom("1".repeat(32)),
+      );
+
+      expect(price).toEqual({
+        guid: "1".repeat(32),
+        commodity: EUR,
+        currency: USD,
+        time: "2026-01-15 00:00:00 +0000",
+        source: "user:price-editor",
+        type: "",
+        value: money(108n, 100n),
+      });
+
+      const serialized = doc.serialize();
+      expect(serialized).toContain('<gnc:pricedb version="1">');
+      expect(serialized).toContain(
+        `<price:id type="guid">${"1".repeat(32)}</price:id>`,
+      );
+      expect(serialized).toContain(
+        "<price:commodity><cmdty:space>CURRENCY</cmdty:space><cmdty:id>EUR</cmdty:id></price:commodity>",
+      );
+      expect(serialized).toContain("<price:source>user:price-editor</price:source>");
+      expect(serialized).not.toContain("<price:type>");
+      expect(serialized).toContain("<price:value>108/100</price:value>");
+
+      const reparsed = GncXmlDocument.parse(serialized);
+      expect(reparsed.price(price.guid)).toEqual(price);
+    });
+
+    it("writes price:type only when given, before price:value", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      doc.createPrice(
+        {
+          commodity: AAPL,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          type: "last",
+          value: money(19000n, 100n),
+        },
+        guidFrom("2".repeat(32)),
+      );
+      const serialized = doc.serialize();
+      expect(serialized).toContain(
+        "<price:type>last</price:type><price:value>19000/100</price:value>",
+      );
+    });
+
+    it("omits <gnc:pricedb> entirely when the book has no prices", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      expect(doc.serialize()).not.toContain("gnc:pricedb");
+    });
+
+    it("removes <gnc:pricedb> once the last price is deleted", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const price = doc.createPrice(
+        {
+          commodity: EUR,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          value: money(108n, 100n),
+        },
+        guidFrom("1".repeat(32)),
+      );
+      expect(doc.serialize()).toContain("gnc:pricedb");
+      doc.deletePrice(price.guid);
+      expect(doc.prices()).toEqual([]);
+      expect(doc.serialize()).not.toContain("gnc:pricedb");
+      // Deleting an unknown price is a silent no-op, matching deleteAccount/deleteBudget.
+      expect(() => doc.deletePrice("f".repeat(32))).not.toThrow();
+    });
+
+    it("supports multiple prices across different commodity/currency pairs", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      doc.createPrice(
+        {
+          commodity: EUR,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          value: money(108n, 100n),
+        },
+        guidFrom("1".repeat(32)),
+      );
+      doc.createPrice(
+        {
+          commodity: AAPL,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          value: money(19000n, 100n),
+        },
+        guidFrom("2".repeat(32)),
+      );
+      expect(doc.prices()).toHaveLength(2);
+    });
+
+    it("rejects a duplicate price guid", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      doc.createPrice(
+        {
+          commodity: EUR,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          value: money(108n, 100n),
+        },
+        guidFrom("1".repeat(32)),
+      );
+      expect(() =>
+        doc.createPrice(
+          {
+            commodity: AAPL,
+            currency: USD,
+            time: "2026-01-15 00:00:00 +0000",
+            value: money(1n, 1n),
+          },
+          guidFrom("1".repeat(32)),
+        ),
+      ).toThrow(GncXmlError);
+    });
+
+    it("updates time, value and type independently, adding and removing type", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const price = doc.createPrice(
+        {
+          commodity: EUR,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          value: money(108n, 100n),
+        },
+        guidFrom("1".repeat(32)),
+      );
+
+      const withTime = doc.updatePrice(price.guid, {
+        time: "2026-02-01 00:00:00 +0000",
+      });
+      expect(withTime.time).toBe("2026-02-01 00:00:00 +0000");
+      expect(withTime.value).toEqual(money(108n, 100n));
+
+      const withValue = doc.updatePrice(price.guid, { value: money(110n, 100n) });
+      expect(withValue.value).toEqual(money(110n, 100n));
+
+      const withType = doc.updatePrice(price.guid, { type: "last" });
+      expect(withType.type).toBe("last");
+      expect(doc.serialize()).toContain(
+        "<price:type>last</price:type><price:value>110/100</price:value>",
+      );
+
+      // Replacing an already-set type updates it in place.
+      const withReplacedType = doc.updatePrice(price.guid, { type: "transaction" });
+      expect(withReplacedType.type).toBe("transaction");
+
+      const withoutType = doc.updatePrice(price.guid, { type: "" });
+      expect(withoutType.type).toBe("");
+      expect(doc.serialize()).not.toContain("<price:type>");
+
+      // Setting the same (now-absent) type again is a no-op, not an error.
+      const stillWithoutType = doc.updatePrice(price.guid, { type: "" });
+      expect(stillWithoutType.type).toBe("");
+    });
+
+    it("rejects updating an unknown price", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      expect(() => doc.updatePrice("f".repeat(32), { value: money(1n, 1n) })).toThrow(
+        GncXmlError,
+      );
+    });
+
+    it("returns undefined for an unknown price guid", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      expect(doc.price("f".repeat(32))).toBeUndefined();
+    });
+
+    it("creates <gnc:pricedb> right after book:id when the book declares no commodities", () => {
+      const xml = `<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:book="http://www.gnucash.org/XML/book" xmlns:cmdty="http://www.gnucash.org/XML/cmdty" xmlns:price="http://www.gnucash.org/XML/price" xmlns:ts="http://www.gnucash.org/XML/ts">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"b".repeat(32)}</book:id>
+</gnc:book>
+</gnc-v2>`;
+      const doc = GncXmlDocument.parse(xml);
+      const price = doc.createPrice(
+        {
+          commodity: EUR,
+          currency: USD,
+          time: "2026-01-15 00:00:00 +0000",
+          value: money(108n, 100n),
+        },
+        guidFrom("1".repeat(32)),
+      );
+      expect(doc.price(price.guid)).toEqual(price);
+      const serialized = doc.serialize();
+      // After book:id (never before it), even with no commodity to anchor on.
+      expect(serialized.indexOf("<book:id")).toBeLessThan(
+        serialized.indexOf("<gnc:pricedb"),
+      );
+    });
+
+    it("defaults missing commodity, currency, time, source and value on a malformed price entry", () => {
+      const xml = `<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:book="http://www.gnucash.org/XML/book" xmlns:price="http://www.gnucash.org/XML/price">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"b".repeat(32)}</book:id>
+<gnc:pricedb version="1">
+  <price>
+    <price:id type="guid">${"8".repeat(32)}</price:id>
+  </price>
+</gnc:pricedb>
+</gnc:book>
+</gnc-v2>`;
+      const doc = GncXmlDocument.parse(xml);
+      expect(doc.price("8".repeat(32))).toEqual({
+        guid: "8".repeat(32),
+        commodity: { space: "ISO4217", id: "USD" },
+        currency: { space: "ISO4217", id: "USD" },
+        time: "",
+        source: "",
+        type: "",
+        value: money(0n, 1n),
+      });
+
+      // Updating a malformed entry with no price:time wrapper is a safe no-op for that field...
+      const updated = doc.updatePrice("8".repeat(32), {
+        time: "2026-01-01 00:00:00 +0000",
+        type: "last",
+      });
+      expect(updated.time).toBe("");
+      // ...but adding a type still works, inserted even with no price:value to anchor before.
+      expect(updated.type).toBe("last");
+      expect(doc.serialize()).toContain("<price:type>last</price:type>");
+    });
+
+    describe("nearestPrice", () => {
+      function withThreePrices(doc: GncXmlDocument) {
+        doc.createPrice(
+          {
+            commodity: EUR,
+            currency: USD,
+            time: "2026-01-01 00:00:00 +0000",
+            value: money(105n, 100n),
+          },
+          guidFrom("1".repeat(32)),
+        );
+        doc.createPrice(
+          {
+            commodity: EUR,
+            currency: USD,
+            time: "2026-01-10 00:00:00 +0000",
+            value: money(108n, 100n),
+          },
+          guidFrom("2".repeat(32)),
+        );
+        doc.createPrice(
+          {
+            commodity: EUR,
+            currency: USD,
+            time: "2026-01-20 00:00:00 +0000",
+            value: money(110n, 100n),
+          },
+          guidFrom("3".repeat(32)),
+        );
+      }
+
+      it("returns an exact match", async () => {
+        const doc = GncXmlDocument.parse(await loadFixtureXml());
+        withThreePrices(doc);
+        expect(doc.nearestPrice(EUR, USD, "2026-01-10")?.value).toEqual(
+          money(108n, 100n),
+        );
+      });
+
+      it("picks the closer of two surrounding prices", async () => {
+        const doc = GncXmlDocument.parse(await loadFixtureXml());
+        withThreePrices(doc);
+        // 2026-01-12 is 2 days after the 10th, 8 days before the 20th.
+        expect(doc.nearestPrice(EUR, USD, "2026-01-12")?.value).toEqual(
+          money(108n, 100n),
+        );
+        // 2026-01-16 is 6 days after the 10th, 4 days before the 20th.
+        expect(doc.nearestPrice(EUR, USD, "2026-01-16")?.value).toEqual(
+          money(110n, 100n),
+        );
+      });
+
+      it("picks the earliest price when asking before it, and the latest when asking after", async () => {
+        const doc = GncXmlDocument.parse(await loadFixtureXml());
+        withThreePrices(doc);
+        expect(doc.nearestPrice(EUR, USD, "2025-12-01")?.value).toEqual(
+          money(105n, 100n),
+        );
+        expect(doc.nearestPrice(EUR, USD, "2026-06-01")?.value).toEqual(
+          money(110n, 100n),
+        );
+      });
+
+      it("returns null when no price exists for the pair", async () => {
+        const doc = GncXmlDocument.parse(await loadFixtureXml());
+        withThreePrices(doc);
+        expect(doc.nearestPrice(AAPL, USD, "2026-01-10")).toBeNull();
+      });
+    });
+
+    describe("convertMoney", () => {
+      it("returns the value unchanged for identical commodities", async () => {
+        const doc = GncXmlDocument.parse(await loadFixtureXml());
+        expect(doc.convertMoney(money(100n, 1n), USD, USD, "2026-01-10")).toEqual(
+          money(100n, 1n),
+        );
+      });
+
+      it("converts using the nearest price", async () => {
+        const doc = GncXmlDocument.parse(await loadFixtureXml());
+        doc.createPrice(
+          {
+            commodity: EUR,
+            currency: USD,
+            time: "2026-01-10 00:00:00 +0000",
+            value: money(2n, 1n),
+          },
+          guidFrom("1".repeat(32)),
+        );
+        expect(doc.convertMoney(money(50n, 1n), EUR, USD, "2026-01-10")).toEqual(
+          money(100n, 1n),
+        );
+      });
+
+      it("returns null when no price exists for the pair", async () => {
+        const doc = GncXmlDocument.parse(await loadFixtureXml());
+        expect(doc.convertMoney(money(50n, 1n), EUR, USD, "2026-01-10")).toBeNull();
+      });
+    });
+
+    it("round-trips a hand-written fixture with no price:type, defaulting it to empty", () => {
+      const xml = `<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:book="http://www.gnucash.org/XML/book" xmlns:cmdty="http://www.gnucash.org/XML/cmdty" xmlns:price="http://www.gnucash.org/XML/price" xmlns:ts="http://www.gnucash.org/XML/ts">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"b".repeat(32)}</book:id>
+<gnc:pricedb version="1">
+  <price>
+    <price:id type="guid">${"9".repeat(32)}</price:id>
+    <price:commodity><cmdty:space>NASDAQ</cmdty:space><cmdty:id>CORL</cmdty:id></price:commodity>
+    <price:currency><cmdty:space>ISO4217</cmdty:space><cmdty:id>USD</cmdty:id></price:currency>
+    <price:time><ts:date>2001-03-26 12:59:00 -0800</ts:date></price:time>
+    <price:source>Finance::Quote</price:source>
+    <price:value>237500000/100000000</price:value>
+  </price>
+</gnc:pricedb>
+</gnc:book>
+</gnc-v2>`;
+      const doc = GncXmlDocument.parse(xml);
+      expect(doc.price("9".repeat(32))).toEqual({
+        guid: "9".repeat(32),
+        commodity: { space: "NASDAQ", id: "CORL" },
+        currency: { space: "ISO4217", id: "USD" },
+        time: "2001-03-26 12:59:00 -0800",
+        source: "Finance::Quote",
+        type: "",
+        value: money(237500000n, 100000000n),
+      });
+      const reparsed = GncXmlDocument.parse(doc.serialize());
+      expect(reparsed.price("9".repeat(32))).toEqual(doc.price("9".repeat(32)));
+    });
+  });
+
   it("creates a customer, an invoice with lines, and posts it as a real transaction", async () => {
     const doc = GncXmlDocument.parse(await loadFixtureXml());
     const customerGuid = guidFrom("c".repeat(32));
