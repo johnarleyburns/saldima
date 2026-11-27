@@ -154,6 +154,7 @@ defers the full `worker/edge/book` split to P1. Boundary rules still apply:
 | `pnpm vectors`           | regenerate `fixtures/vectors/*.json` deterministically                       |
 | `pnpm check:licenses`    | dependency license scan (GPL/AGPL/unknown fail)                              |
 | `pnpm check:spdx`        | every tracked source file has an SPDX header                                 |
+| `pnpm accounting-bridge` | NDJSON stdin/stdout bridge over `packages/gnucash`'s pure ledger functions, for the external `saldima-accounting-verifier` harness to drive as a subprocess |
 
 Never run a deploy command. `wrangler deploy` is owner-only and lives in
 protected GitHub Environments.

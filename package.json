@@ -20,6 +20,7 @@
     "check:spdx": "node scripts/check-spdx.mjs",
     "check:licenses": "node scripts/license-scan.mjs",
     "check:docs": "node scripts/check-docs.mjs",
+    "accounting-bridge": "tsx packages/gnucash/src/cli.ts",
     "vectors": "tsx scripts/vectors.ts",
     "fixtures:gronewald": "tsx scripts/import-gronewald-fixture.ts",
     "check:workflows": "./scripts/check-workflows.sh",
