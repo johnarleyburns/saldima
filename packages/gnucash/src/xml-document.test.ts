@@ -401,6 +401,599 @@ describe("GncXmlDocument", () => {
     );
   });
 
+  describe("scheduled transactions", () => {
+    function createMonthlySalary(doc: GncXmlDocument, sxGuid: string) {
+      return doc.createScheduledTransaction(
+        {
+          name: "Monthly salary",
+          description: "Salary",
+          currency: USD,
+          autoCreate: true,
+          advanceCreateDays: 2,
+          advanceRemindDays: 5,
+          start: "2026-01-15",
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-01-15",
+            weekendAdjust: "none",
+          },
+          templateSplits: [
+            { accountGuid: BANK, value: money(50000n, 100n) },
+            { accountGuid: SALARY, value: money(-50000n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom(sxGuid),
+          templateAccount: guidFrom("d".repeat(32)),
+          templateTransaction: guidFrom("e".repeat(32)),
+          templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          templateRoot: guidFrom("f2".repeat(16)),
+        },
+      );
+    }
+
+    it("creates a scheduled transaction matching real GnuCash's on-disk shape, and reads it back", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = createMonthlySalary(doc, "1".repeat(32));
+
+      expect(sx).toMatchObject({
+        name: "Monthly salary",
+        description: "Salary",
+        enabled: true,
+        autoCreate: true,
+        autoCreateNotify: false,
+        advanceCreateDays: 2,
+        advanceRemindDays: 5,
+        start: "2026-01-15",
+        lastOccurred: null,
+        instanceCount: 0,
+        end: null,
+        recurrence: {
+          periodType: "month",
+          multiplier: 1,
+          start: "2026-01-15",
+          weekendAdjust: "none",
+        },
+      });
+      expect(sx.templateSplits).toEqual([
+        { accountGuid: BANK, value: money(50000n, 100n) },
+        { accountGuid: SALARY, value: money(-50000n, 100n) },
+      ]);
+
+      const serialized = doc.serialize();
+      expect(serialized).toContain("<gnc:template-transactions>");
+      expect(serialized).toContain("<act:name>Template Root</act:name>");
+      expect(serialized).toContain("<act:type>ROOT</act:type>");
+      expect(serialized).toContain("<cmdty:space>template</cmdty:space>");
+      expect(serialized).toContain(
+        "<recurrence:period_type>month</recurrence:period_type>",
+      );
+      expect(serialized).toContain("<slot:key>sched-xaction</slot:key>");
+      expect(serialized).toContain("<slot:key>debit-formula</slot:key>");
+      // The unused side of each split's KVP is an empty formula and a zero
+      // numeric, not omitted -- matching real GnuCash exactly.
+      expect(serialized).toContain(
+        '<slot:key>credit-formula</slot:key><slot:value type="string"/>',
+      );
+      expect(serialized).toContain(
+        '<slot:key>credit-numeric</slot:key><slot:value type="numeric">0/1</slot:value>',
+      );
+
+      // Not a normal account/transaction: stays out of the everyday lists.
+      expect(doc.accounts().some((a) => a.guid === sx.templateAccountGuid)).toBe(false);
+      expect(doc.transactions()).toHaveLength(1); // only the fixture's own pre-existing one
+
+      const reparsed = GncXmlDocument.parse(serialized);
+      expect(reparsed.scheduledTransaction(sx.guid)).toEqual(sx);
+    });
+
+    it("shares one Template Root across multiple scheduled transactions", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      createMonthlySalary(doc, "1".repeat(32));
+      const second = doc.createScheduledTransaction(
+        {
+          name: "Rent",
+          description: "Rent",
+          currency: USD,
+          start: "2026-02-01",
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-02-01",
+            weekendAdjust: "none",
+          },
+          templateSplits: [
+            { accountGuid: SALARY, value: money(120000n, 100n) },
+            { accountGuid: BANK, value: money(-120000n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom("2".repeat(32)),
+          templateAccount: guidFrom("3".repeat(32)),
+          templateTransaction: guidFrom("4".repeat(32)),
+          templateSplits: [guidFrom("a0".repeat(16)), guidFrom("a1".repeat(16))],
+          // No templateRoot id -- must reuse the one the first SX created.
+        },
+      );
+      expect(doc.scheduledTransactions()).toHaveLength(2);
+      expect((doc.serialize().match(/<act:type>ROOT<\/act:type>/g) ?? []).length).toBe(
+        2,
+      ); // the fixture's book root + one shared template root
+      expect(second.enabled).toBe(true);
+      expect(second.autoCreate).toBe(false);
+    });
+
+    it("refuses to create the first scheduled transaction without a template-root id, an unbalanced template, too few splits, or a duplicate guid", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      expect(() =>
+        doc.createScheduledTransaction(
+          {
+            name: "x",
+            description: "x",
+            currency: USD,
+            start: "2026-01-01",
+            recurrence: {
+              periodType: "month",
+              multiplier: 1,
+              start: "2026-01-01",
+              weekendAdjust: "none",
+            },
+            templateSplits: [
+              { accountGuid: BANK, value: money(100n, 100n) },
+              { accountGuid: SALARY, value: money(-100n, 100n) },
+            ],
+          },
+          {
+            scheduledTransaction: guidFrom("1".repeat(32)),
+            templateAccount: guidFrom("d".repeat(32)),
+            templateTransaction: guidFrom("e".repeat(32)),
+            templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          },
+        ),
+      ).toThrow(GncXmlError);
+
+      expect(() =>
+        doc.createScheduledTransaction(
+          {
+            name: "x",
+            description: "x",
+            currency: USD,
+            start: "2026-01-01",
+            recurrence: {
+              periodType: "month",
+              multiplier: 1,
+              start: "2026-01-01",
+              weekendAdjust: "none",
+            },
+            templateSplits: [{ accountGuid: BANK, value: money(100n, 100n) }],
+          },
+          {
+            scheduledTransaction: guidFrom("1".repeat(32)),
+            templateAccount: guidFrom("d".repeat(32)),
+            templateTransaction: guidFrom("e".repeat(32)),
+            templateSplits: [guidFrom("f0".repeat(16))],
+            templateRoot: guidFrom("f2".repeat(16)),
+          },
+        ),
+      ).toThrow(GncXmlError);
+
+      expect(() =>
+        doc.createScheduledTransaction(
+          {
+            name: "x",
+            description: "x",
+            currency: USD,
+            start: "2026-01-01",
+            recurrence: {
+              periodType: "month",
+              multiplier: 1,
+              start: "2026-01-01",
+              weekendAdjust: "none",
+            },
+            templateSplits: [
+              { accountGuid: BANK, value: money(100n, 100n) },
+              { accountGuid: SALARY, value: money(-99n, 100n) },
+            ],
+          },
+          {
+            scheduledTransaction: guidFrom("1".repeat(32)),
+            templateAccount: guidFrom("d".repeat(32)),
+            templateTransaction: guidFrom("e".repeat(32)),
+            templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+            templateRoot: guidFrom("f2".repeat(16)),
+          },
+        ),
+      ).toThrow(GncXmlError);
+
+      createMonthlySalary(doc, "1".repeat(32));
+      expect(() => createMonthlySalary(doc, "1".repeat(32))).toThrow(GncXmlError);
+    });
+
+    it("updates the simple fields of a scheduled transaction, and rejects an unknown guid", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = createMonthlySalary(doc, "1".repeat(32));
+      const updated = doc.updateScheduledTransaction(sx.guid, {
+        name: "Renamed",
+        enabled: false,
+        autoCreate: false,
+        autoCreateNotify: true,
+        advanceCreateDays: 10,
+        advanceRemindDays: 20,
+      });
+      expect(updated).toMatchObject({
+        name: "Renamed",
+        enabled: false,
+        autoCreate: false,
+        autoCreateNotify: true,
+        advanceCreateDays: 10,
+        advanceRemindDays: 20,
+      });
+      expect(() =>
+        doc.updateScheduledTransaction(guidFrom("f".repeat(32)), { name: "x" }),
+      ).toThrow(GncXmlError);
+
+      // A partial update leaves every other field untouched.
+      const partial = doc.updateScheduledTransaction(sx.guid, {
+        name: "Renamed again",
+      });
+      expect(partial).toMatchObject({
+        name: "Renamed again",
+        enabled: false,
+        autoCreate: false,
+        autoCreateNotify: true,
+        advanceCreateDays: 10,
+        advanceRemindDays: 20,
+      });
+    });
+
+    it("round-trips a weekend-adjusted recurrence", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = doc.createScheduledTransaction(
+        {
+          name: "Weekend adjusted",
+          description: "Weekend adjusted",
+          currency: USD,
+          start: "2026-01-15",
+          recurrence: {
+            periodType: "week",
+            multiplier: 1,
+            start: "2026-01-15",
+            weekendAdjust: "forward",
+          },
+          templateSplits: [
+            { accountGuid: BANK, value: money(100n, 100n) },
+            { accountGuid: SALARY, value: money(-100n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom("1".repeat(32)),
+          templateAccount: guidFrom("d".repeat(32)),
+          templateTransaction: guidFrom("e".repeat(32)),
+          templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          templateRoot: guidFrom("f2".repeat(16)),
+        },
+      );
+      expect(sx.recurrence.weekendAdjust).toBe("forward");
+      const reparsed = GncXmlDocument.parse(doc.serialize());
+      expect(reparsed.scheduledTransaction(sx.guid)?.recurrence.weekendAdjust).toBe(
+        "forward",
+      );
+    });
+
+    it("can be created disabled, with autoCreateNotify on, and in a currency with no commodity entry yet", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = doc.createScheduledTransaction(
+        {
+          name: "Disabled, notify-on-create, unknown currency",
+          description: "x",
+          currency: { space: "CURRENCY", id: "GBP" },
+          enabled: false,
+          autoCreate: true,
+          autoCreateNotify: true,
+          start: "2026-01-15",
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-01-15",
+            weekendAdjust: "none",
+          },
+          templateSplits: [
+            { accountGuid: BANK, value: money(100n, 100n) },
+            { accountGuid: SALARY, value: money(-100n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom("1".repeat(32)),
+          templateAccount: guidFrom("d".repeat(32)),
+          templateTransaction: guidFrom("e".repeat(32)),
+          templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          templateRoot: guidFrom("f2".repeat(16)),
+        },
+      );
+      expect(sx).toMatchObject({
+        enabled: false,
+        autoCreate: true,
+        autoCreateNotify: true,
+      });
+      // A currency with no existing commodity entry falls back to the
+      // conventional 100 (cents) fraction for the zero placeholder value.
+      expect(doc.serialize()).toContain("<split:value>0/100</split:value>");
+    });
+
+    it("uses an existing commodity's own fraction for the zero placeholder value", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      doc.ensureCommodity({ space: "CURRENCY", id: "EUR" }, 100);
+      doc.createScheduledTransaction(
+        {
+          name: "Euro schedule",
+          description: "x",
+          currency: { space: "CURRENCY", id: "EUR" },
+          start: "2026-01-15",
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-01-15",
+            weekendAdjust: "none",
+          },
+          templateSplits: [
+            { accountGuid: BANK, value: money(100n, 100n) },
+            { accountGuid: SALARY, value: money(-100n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom("1".repeat(32)),
+          templateAccount: guidFrom("d".repeat(32)),
+          templateTransaction: guidFrom("e".repeat(32)),
+          templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          templateRoot: guidFrom("f2".repeat(16)),
+        },
+      );
+      expect(doc.serialize()).toContain("<split:value>0/100</split:value>");
+    });
+
+    it("defaults missing schedule/template data when reading a hand-written scheduled transaction", () => {
+      const doc = GncXmlDocument.parse(`<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:book="http://www.gnucash.org/XML/book" xmlns:sx="http://www.gnucash.org/XML/sx">
+<gnc:book version="2.0.0">
+<book:id type="guid">${"9".repeat(32)}</book:id>
+<gnc:schedxaction version="2.0.0">
+  <sx:id type="guid">${"1".repeat(32)}</sx:id>
+  <sx:name>Minimal</sx:name>
+  <sx:advanceCreateDays>0</sx:advanceCreateDays>
+  <sx:advanceRemindDays>0</sx:advanceRemindDays>
+  <sx:instanceCount>0</sx:instanceCount>
+  <sx:start><gdate>2026-01-01</gdate></sx:start>
+  <sx:templ-acct type="guid">${"f".repeat(32)}</sx:templ-acct>
+</gnc:schedxaction>
+</gnc:book>
+</gnc-v2>`);
+      const sx = doc.scheduledTransaction("1".repeat(32));
+      expect(sx).toMatchObject({
+        name: "Minimal",
+        description: "",
+        currency: { space: "CURRENCY", id: "USD" },
+        enabled: true,
+        autoCreate: false,
+        autoCreateNotify: false,
+        recurrence: {
+          periodType: "once",
+          multiplier: 1,
+          start: "2026-01-01",
+          weekendAdjust: "none",
+        },
+        templateSplits: [],
+      });
+    });
+
+    it("posts a due instance, advancing sx:last and instanceCount, and rejects an unknown guid", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = createMonthlySalary(doc, "1".repeat(32));
+
+      const posted = doc.postScheduledInstance(sx.guid, "2026-01-15", {
+        transaction: guidFrom("9".repeat(32)),
+        splits: [guidFrom("b0".repeat(16)), guidFrom("b1".repeat(16))],
+      });
+      expect(posted.description).toBe("Salary");
+      expect(posted.splits.map((s) => [s.accountGuid, s.value])).toEqual([
+        [BANK, money(50000n, 100n)],
+        [SALARY, money(-50000n, 100n)],
+      ]);
+
+      const advanced = doc.scheduledTransaction(sx.guid);
+      expect(advanced?.lastOccurred).toBe("2026-01-15");
+      expect(advanced?.instanceCount).toBe(1);
+
+      // Posting again updates sx:last in place rather than duplicating it.
+      doc.postScheduledInstance(sx.guid, "2026-02-15", {
+        transaction: guidFrom("a".repeat(32)),
+        splits: [guidFrom("d0".repeat(16)), guidFrom("d1".repeat(16))],
+      });
+      const advancedAgain = doc.scheduledTransaction(sx.guid);
+      expect(advancedAgain?.lastOccurred).toBe("2026-02-15");
+      expect(advancedAgain?.instanceCount).toBe(2);
+
+      expect(() =>
+        doc.postScheduledInstance(guidFrom("f".repeat(32)), "2026-02-15", {
+          transaction: guidFrom("8".repeat(32)),
+          splits: [guidFrom("c0".repeat(16)), guidFrom("c1".repeat(16))],
+        }),
+      ).toThrow(GncXmlError);
+    });
+
+    it("skips a due instance without posting anything, and rejects an unknown guid", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = createMonthlySalary(doc, "1".repeat(32));
+      const transactionsBefore = doc.transactions().length;
+
+      doc.skipScheduledInstance(sx.guid, "2026-01-15");
+      expect(doc.transactions()).toHaveLength(transactionsBefore);
+      const advanced = doc.scheduledTransaction(sx.guid);
+      expect(advanced?.lastOccurred).toBe("2026-01-15");
+      expect(advanced?.instanceCount).toBe(1);
+
+      expect(() =>
+        doc.skipScheduledInstance(guidFrom("f".repeat(32)), "2026-01-15"),
+      ).toThrow(GncXmlError);
+    });
+
+    it("deletes a scheduled transaction along with its template account and transaction", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = createMonthlySalary(doc, "1".repeat(32));
+      doc.deleteScheduledTransaction(sx.guid);
+      expect(doc.scheduledTransaction(sx.guid)).toBeUndefined();
+      expect(doc.serialize()).not.toContain(sx.templateAccountGuid);
+      // Deleting an unknown scheduled transaction is a no-op.
+      doc.deleteScheduledTransaction(guidFrom("f".repeat(32)));
+    });
+
+    it("classifies due instances by auto-create/notify and respects the reminder window", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      createMonthlySalary(doc, "1".repeat(32)); // autoCreate: true, autoCreateNotify: false
+
+      // 2026-01-15 + advanceCreateDays(2) = 2026-01-17: due to auto-post as of 2026-01-16.
+      expect(doc.dueScheduledInstances("2026-01-16")).toEqual([
+        {
+          scheduledTransactionGuid: guidFrom("1".repeat(32)),
+          name: "Monthly salary",
+          date: "2026-01-15",
+          action: "autoPost",
+        },
+      ]);
+
+      // Long before the start date and outside the remind window: nothing due.
+      expect(doc.dueScheduledInstances("2025-11-01")).toEqual([]);
+
+      // Within the remind window (5 days past the create boundary) but not yet due to create.
+      const remindOnly = doc.dueScheduledInstances("2026-01-09");
+      expect(remindOnly).toEqual([
+        {
+          scheduledTransactionGuid: guidFrom("1".repeat(32)),
+          name: "Monthly salary",
+          date: "2026-01-15",
+          action: "reminder",
+        },
+      ]);
+
+      // A disabled schedule never shows up.
+      doc.updateScheduledTransaction(guidFrom("1".repeat(32)), { enabled: false });
+      expect(doc.dueScheduledInstances("2026-01-16")).toEqual([]);
+    });
+
+    it("needsApproval when autoCreate is off, and autoPostNotify when both flags are on", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      const sx = doc.createScheduledTransaction(
+        {
+          name: "Manual review",
+          description: "Manual review",
+          currency: USD,
+          start: "2026-01-15",
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-01-15",
+            weekendAdjust: "none",
+          },
+          templateSplits: [
+            { accountGuid: BANK, value: money(100n, 100n) },
+            { accountGuid: SALARY, value: money(-100n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom("1".repeat(32)),
+          templateAccount: guidFrom("d".repeat(32)),
+          templateTransaction: guidFrom("e".repeat(32)),
+          templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          templateRoot: guidFrom("f2".repeat(16)),
+        },
+      );
+      expect(doc.dueScheduledInstances("2026-01-15")[0]?.action).toBe("needsApproval");
+
+      doc.updateScheduledTransaction(sx.guid, {
+        autoCreate: true,
+        autoCreateNotify: true,
+      });
+      expect(doc.dueScheduledInstances("2026-01-15")[0]?.action).toBe("autoPostNotify");
+    });
+
+    it("stops generating instances once an occurrence-count end condition is reached", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      doc.createScheduledTransaction(
+        {
+          name: "Two payments only",
+          description: "Two payments only",
+          currency: USD,
+          autoCreate: true,
+          start: "2026-01-15",
+          end: { occurrences: 1 },
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-01-15",
+            weekendAdjust: "none",
+          },
+          templateSplits: [
+            { accountGuid: BANK, value: money(100n, 100n) },
+            { accountGuid: SALARY, value: money(-100n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom("1".repeat(32)),
+          templateAccount: guidFrom("d".repeat(32)),
+          templateTransaction: guidFrom("e".repeat(32)),
+          templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          templateRoot: guidFrom("f2".repeat(16)),
+        },
+      );
+      expect(doc.dueScheduledInstances("2026-01-16")).toHaveLength(1);
+      doc.postScheduledInstance(guidFrom("1".repeat(32)), "2026-01-15", {
+        transaction: guidFrom("9".repeat(32)),
+        splits: [guidFrom("b0".repeat(16)), guidFrom("b1".repeat(16))],
+      });
+      // The one allowed occurrence has posted -- the schedule is exhausted.
+      expect(doc.dueScheduledInstances("2026-06-01")).toEqual([]);
+    });
+
+    it("stops generating instances once a date-based end condition is passed", async () => {
+      const doc = GncXmlDocument.parse(await loadFixtureXml());
+      doc.createScheduledTransaction(
+        {
+          name: "Ends in February",
+          description: "Ends in February",
+          currency: USD,
+          autoCreate: true,
+          start: "2026-01-15",
+          end: { date: "2026-02-01" },
+          recurrence: {
+            periodType: "month",
+            multiplier: 1,
+            start: "2026-01-15",
+            weekendAdjust: "none",
+          },
+          templateSplits: [
+            { accountGuid: BANK, value: money(100n, 100n) },
+            { accountGuid: SALARY, value: money(-100n, 100n) },
+          ],
+        },
+        {
+          scheduledTransaction: guidFrom("1".repeat(32)),
+          templateAccount: guidFrom("d".repeat(32)),
+          templateTransaction: guidFrom("e".repeat(32)),
+          templateSplits: [guidFrom("f0".repeat(16)), guidFrom("f1".repeat(16))],
+          templateRoot: guidFrom("f2".repeat(16)),
+        },
+      );
+      // The January instance is within the end date.
+      expect(doc.dueScheduledInstances("2026-01-16")).toHaveLength(1);
+      doc.postScheduledInstance(guidFrom("1".repeat(32)), "2026-01-15", {
+        transaction: guidFrom("9".repeat(32)),
+        splits: [guidFrom("b0".repeat(16)), guidFrom("b1".repeat(16))],
+      });
+      // The only remaining candidate, 2026-02-15, is past the 2026-02-01 end date.
+      expect(doc.dueScheduledInstances("2026-03-01")).toEqual([]);
+    });
+  });
+
   it("creates a customer, an invoice with lines, and posts it as a real transaction", async () => {
     const doc = GncXmlDocument.parse(await loadFixtureXml());
     const customerGuid = guidFrom("c".repeat(32));
