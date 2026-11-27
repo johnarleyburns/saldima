@@ -196,8 +196,10 @@ export function writeGnuCashXml(snapshot: BookSnapshot): string {
      xmlns:book="http://www.gnucash.org/XML/book"
      xmlns:cd="http://www.gnucash.org/XML/cd"
      xmlns:cmdty="http://www.gnucash.org/XML/cmdty"
+     xmlns:recurrence="http://www.gnucash.org/XML/recurrence"
      xmlns:slot="http://www.gnucash.org/XML/slot"
      xmlns:split="http://www.gnucash.org/XML/split"
+     xmlns:sx="http://www.gnucash.org/XML/sx"
      xmlns:trn="http://www.gnucash.org/XML/trn"
      xmlns:ts="http://www.gnucash.org/XML/ts">
 <gnc:count-data cd:type="book">1</gnc:count-data>
