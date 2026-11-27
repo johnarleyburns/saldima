@@ -61,12 +61,15 @@ export interface XmlSplit {
   readonly accountGuid: string;
   readonly memo: string;
   readonly action: string;
-  /** `"n"` not reconciled, `"c"` cleared, `"y"` reconciled -- GnuCash's own codes. */
+  /** `"n"` not reconciled, `"c"` cleared, `"y"` reconciled, `"v"` voided -- GnuCash's own codes. */
   readonly reconcileState: string;
   /** Set only once `reconcileState` is `"y"`; `YYYY-MM-DD HH:MM:SS +ZZZZ`. */
   readonly reconcileDate: string | null;
   readonly value: Money;
   readonly quantity: Money;
+  /** Pre-void value/quantity, set only while the parent transaction is voided. */
+  readonly voidFormerValue: Money | null;
+  readonly voidFormerQuantity: Money | null;
 }
 
 export interface XmlTransaction {
@@ -84,6 +87,11 @@ export interface XmlTransaction {
    * on where that storage physically lives), but reads whatever is there.
    */
   readonly docLink: string | null;
+  /** True once `voidTransaction` has run; every split's value/quantity is zeroed. */
+  readonly voided: boolean;
+  readonly voidReason: string | null;
+  /** `YYYY-MM-DD HH:MM:SS +ZZZZ`, set only while voided. */
+  readonly voidTime: string | null;
 }
 
 /** A GnuCash `GncCustomer` business object: a billing contact for invoices. */
@@ -410,11 +418,67 @@ function setLeafText(parent: XmlNode, tag: string, value: string): void {
 }
 
 function findOrCreateSlots(
-  accountOrTransaction: XmlNode,
-  ownerTag: "act" | "trn",
+  accountOrTransactionOrSplit: XmlNode,
+  ownerTag: "act" | "trn" | "split",
 ): XmlNode {
-  return setOrCreateChild(accountOrTransaction, "slots", () =>
+  return setOrCreateChild(accountOrTransactionOrSplit, "slots", () =>
     node(`${ownerTag}:slots`),
+  );
+}
+
+function findSlot(slots: XmlNode, key: string): XmlNode | undefined {
+  return children(slots, "slot").find((slot) => decoded(first(slot, "key")) === key);
+}
+
+function readStringSlot(owner: XmlNode, key: string): string | null {
+  const slots = first(owner, "slots");
+  if (!slots) return null;
+  const slot = findSlot(slots, key);
+  return slot ? decoded(first(slot, "value")) : null;
+}
+
+function setStringSlot(slots: XmlNode, key: string, value: string | null): void {
+  const existing = findSlot(slots, key);
+  if (value === null) {
+    if (existing) removeChild(slots, existing);
+    return;
+  }
+  if (existing) {
+    setLeafText(existing, "slot:value", value);
+    return;
+  }
+  slots.children.push(
+    node("slot", {}, [
+      leaf("slot:key", key),
+      leaf("slot:value", value, { type: "string" }),
+    ]),
+  );
+}
+
+function readNumericSlot(owner: XmlNode, key: string): Money | null {
+  const slots = first(owner, "slots");
+  if (!slots) return null;
+  const slot = findSlot(slots, key);
+  const valueNode = slot ? first(slot, "value") : undefined;
+  return valueNode ? rational(text(valueNode)) : null;
+}
+
+function setNumericSlot(slots: XmlNode, key: string, value: Money | null): void {
+  const existing = findSlot(slots, key);
+  if (value === null) {
+    if (existing) removeChild(slots, existing);
+    return;
+  }
+  const valueText = rationalText(value);
+  if (existing) {
+    setLeafText(existing, "slot:value", valueText);
+    return;
+  }
+  slots.children.push(
+    node("slot", {}, [
+      leaf("slot:key", key),
+      leaf("slot:value", valueText, { type: "numeric" }),
+    ]),
   );
 }
 
@@ -662,6 +726,8 @@ export class GncXmlDocument {
           quantity: rational(
             text(first(splitNode, "quantity")) || text(first(splitNode, "value")),
           ),
+          voidFormerValue: readNumericSlot(splitNode, "void-former-value"),
+          voidFormerQuantity: readNumericSlot(splitNode, "void-former-amount"),
         };
       },
     );
@@ -680,6 +746,9 @@ export class GncXmlDocument {
       description: decoded(first(transactionNode, "description")),
       splits,
       docLink: docLinkSlot ? decoded(first(docLinkSlot, "value")) : null,
+      voided: readStringSlot(transactionNode, "void-time") !== null,
+      voidReason: readStringSlot(transactionNode, "void-reason"),
+      voidTime: readStringSlot(transactionNode, "void-time"),
     };
   }
 
@@ -813,6 +882,101 @@ export class GncXmlDocument {
       removeChild(slots, existing);
     }
     if (slots.children.length === 0) removeChild(transactionNode, slots);
+  }
+
+  /**
+   * Voids a transaction exactly like desktop GnuCash's own `xaccTransVoid`:
+   * every split's value and quantity is preserved in a `void-former-*`
+   * slot, then zeroed (so the transaction stops affecting any balance
+   * without being deleted), every split is marked `"v"`, and the
+   * transaction's notes/void-reason/void-time/read-only slots record why
+   * and when. Refuses to void an already-voided transaction.
+   */
+  voidTransaction(transactionGuid: string, reason: string, voidTime: string): void {
+    const transactionNode = this.transactionNodes.get(transactionGuid);
+    if (!transactionNode) {
+      throw new GncXmlError(`unknown transaction ${transactionGuid}`);
+    }
+    if (!reason.trim()) {
+      throw new GncXmlError("a reason is required to void a transaction");
+    }
+    if (readStringSlot(transactionNode, "void-time") !== null) {
+      throw new GncXmlError(`transaction ${transactionGuid} is already voided`);
+    }
+
+    const slots = findOrCreateSlots(transactionNode, "trn");
+    const existingNotes = readStringSlot(transactionNode, "notes");
+    if (existingNotes !== null)
+      setStringSlot(slots, "void-former-notes", existingNotes);
+    setStringSlot(slots, "notes", "Voided transaction");
+    setStringSlot(slots, "void-reason", reason);
+    setStringSlot(slots, "void-time", voidTime);
+    setStringSlot(slots, "trans-read-only", "Transaction Voided");
+
+    const splitsContainer = first(transactionNode, "splits") ?? transactionNode;
+    for (const splitNode of children(splitsContainer, "split")) {
+      const value = rational(text(first(splitNode, "value")));
+      const quantity = rational(
+        text(first(splitNode, "quantity")) || text(first(splitNode, "value")),
+      );
+      const splitSlots = findOrCreateSlots(splitNode, "split");
+      setNumericSlot(splitSlots, "void-former-value", value);
+      setNumericSlot(splitSlots, "void-former-amount", quantity);
+      setLeafText(
+        splitNode,
+        "split:value",
+        rationalText({ num: 0n, denom: value.denom }),
+      );
+      setLeafText(
+        splitNode,
+        "split:quantity",
+        rationalText({ num: 0n, denom: quantity.denom }),
+      );
+      setLeafText(splitNode, "split:reconciled-state", "v");
+    }
+  }
+
+  /**
+   * Reverses `voidTransaction`: restores every split's original
+   * value/quantity and reconcile state (always back to `"n"`, matching
+   * desktop GnuCash -- a split's reconciled state before voiding is not
+   * preserved), restores the transaction's notes, and clears every
+   * void-related slot. No-ops are not allowed: refuses a transaction that
+   * isn't voided.
+   */
+  unvoidTransaction(transactionGuid: string): void {
+    const transactionNode = this.transactionNodes.get(transactionGuid);
+    if (!transactionNode) {
+      throw new GncXmlError(`unknown transaction ${transactionGuid}`);
+    }
+    if (readStringSlot(transactionNode, "void-time") === null) {
+      throw new GncXmlError(`transaction ${transactionGuid} is not voided`);
+    }
+
+    const slots = findOrCreateSlots(transactionNode, "trn");
+    setStringSlot(slots, "notes", readStringSlot(transactionNode, "void-former-notes"));
+    setStringSlot(slots, "void-former-notes", null);
+    setStringSlot(slots, "void-reason", null);
+    setStringSlot(slots, "void-time", null);
+    setStringSlot(slots, "trans-read-only", null);
+    if (slots.children.length === 0) removeChild(transactionNode, slots);
+
+    const splitsContainer = first(transactionNode, "splits") ?? transactionNode;
+    for (const splitNode of children(splitsContainer, "split")) {
+      const formerValue = readNumericSlot(splitNode, "void-former-value");
+      const formerQuantity = readNumericSlot(splitNode, "void-former-amount");
+      if (formerValue) setLeafText(splitNode, "split:value", rationalText(formerValue));
+      if (formerQuantity) {
+        setLeafText(splitNode, "split:quantity", rationalText(formerQuantity));
+      }
+      setLeafText(splitNode, "split:reconciled-state", "n");
+      const splitSlots = first(splitNode, "slots");
+      if (splitSlots) {
+        setNumericSlot(splitSlots, "void-former-value", null);
+        setNumericSlot(splitSlots, "void-former-amount", null);
+        if (splitSlots.children.length === 0) removeChild(splitNode, splitSlots);
+      }
+    }
   }
 
   // MARK: customers
