@@ -9,6 +9,13 @@ High-level and low-level design behind the spec. TypeScript on Cloudflare Worker
 > accounting store; the cloud holds only encrypted R2 snapshots and
 > coordination metadata, moving toward zero-knowledge client-side encryption
 > instead of the server-held key described below.
+>
+> **Also superseded (single book per tenant):** a tenant's Durable Object
+> now holds *several* companies/books, each identified by a `book_id`
+> (`docs/plans/web-multi-company.md`, implemented). Every reference below to
+> "one Durable Object per book" means one Durable Object per **tenant**,
+> scoped internally by `book_id`; the R2 key layout, routes and queries are
+> all `book_id`-scoped accordingly.
 
 ## High-level design
 
