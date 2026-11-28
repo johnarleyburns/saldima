@@ -211,17 +211,18 @@ Everything except Scheme reports and online banking is in scope, phased so the p
 | Reconcile | Reconcile window against a statement balance and date | None | Full, phone and desktop | P4 |
 | Register | Find and filter (date, amount, text, account, reconcile status) | Basic | Full, saved searches | P4 |
 | Register | Linked files and URLs on transactions | None | Full | P5 |
-| Scheduled | Scheduled transactions and Since Last Run | None | Full | P5 |
-| Import | CSV, OFX/QFX and QIF import with the matcher | None | Full | P5 |
-| Budgets | Budgets by period, budget report | None | Full | P5 |
+| Scheduled | Scheduled transactions and Since Last Run | None | Full | P5 — **shipped** (web #98, iOS #79, Android #51), ahead of schedule |
+| Import | CSV, OFX/QFX and QIF import with the matcher | None | Full | P5 — **shipped on web** (#52); export still open |
+| Budgets | Budgets by period, budget report | None | Full | P5 — **shipped** (web #102/#103, iOS #81/#82, Android #53), ahead of schedule |
 | Reports | Cash flow, trial balance, transaction report, account summary, general journal, charts | None | Rebuilt in TypeScript | P5 |
-| Currencies | Multiple currencies, exchange rates, trading accounts | None | Full | P6 |
-| Investments | Securities, price database, online quotes, lots, capital gains, stock splits, portfolio reports | CLI price update | Full | P6 |
+| Currencies | Multiple currencies, exchange rates, trading accounts | None | Full | P6 — **price database and manual-rate conversion shipped** (web #104/#107, iOS/Android mirrors), ahead of schedule; trading accounts not started |
+| Investments | Securities, price database, online quotes, lots, capital gains, stock splits, portfolio reports | CLI price update | Full | P6 — **price database only** shipped (see Currencies row); securities/lots/capital gains/stock splits/portfolio reports not started |
 | Tools | Loan and mortgage assistant, financial calculator, close book | None | Full | P6 |
 | Business | Customers, vendors, employees, jobs; invoices, bills, vouchers, credit notes, payments, PDF invoices | None | Full | P7 |
 | Business | Billing terms, tax tables, A/R and A/P aging, sales tax report | None | Full | P7 |
 | Out | Custom Scheme reports, Guile scripting | — | Out; offer a read-only SQL/CSV export instead | — |
-| Out | HBCI/AqBanking online banking, check printing | — | Out; bank feeds may come later via an aggregator | — |
+| Out | HBCI/AqBanking online banking | — | Out; bank feeds may come later via an aggregator | — |
+| Check printing | One built-in preset (Quicken/voucher-style check layout), print-styled HTML, no new book data | — | **Shipped on web only** (#108/#109) — reversing this spec's earlier "Out" call. Owner decision, recorded here: web-only, since check printing needs a printer attached to the device, not a realistic phone workflow; mobile apps intentionally do not get this feature. | — |
 
 ### Web-only extras
 
