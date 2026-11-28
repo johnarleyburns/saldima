@@ -563,7 +563,7 @@ The spec is ready for P0 on both tracks. A coding agent can start once you finis
 3. `Clock` and `IDGenerator` seams with fakes.
 4. `Money` and `Guid` in Swift replaying the web's vectors, pulled by a script pinned to a web commit. Accept: every vector passes.
 5. SQLite actor that opens the fixture `.gnucash` read-only and lists the account tree. Accept: the tree matches the web's vector.
-6. Empty Liquid Glass shell (tabs: Accounts, Register, Receipts, Reports, Settings). Accept: installs from TestFlight on your iPhone after your approval.
+6. Empty Liquid Glass shell. Accept: installs from TestFlight on your iPhone after your approval. The tab bar described here at P0 time (Accounts, Register, Receipts, Reports, Settings) is historical: the shipped tab bar is Accounts, Invoices, Reconcile, Receipts, with Register, Reports, Scheduled, Budgets, Prices and Bills in the Accounts screen's overflow menu and Settings reached from there too (`saldima-ios` PRs #63, #76, #85).
 
 ### Definition of done (every PR)
 
