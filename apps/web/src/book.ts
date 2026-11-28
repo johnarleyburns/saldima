@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import {
   addMoney,
+  amountInWords,
   type BookSnapshot,
   type DueScheduledInstance,
   equalsMoney,
@@ -488,6 +489,7 @@ export class Book {
     app.post("/app/journal", (c) => this.createTransaction(c));
     app.post("/app/journal/:guid/void", (c) => this.voidTransactionRoute(c));
     app.post("/app/journal/:guid/unvoid", (c) => this.unvoidTransactionRoute(c));
+    app.get("/app/journal/:guid/print-check", (c) => this.printCheckPage(c));
     app.get("/app/scheduled", (c) => this.scheduledTransactionsPage(c));
     app.get("/app/scheduled/new", (c) => this.newScheduledTransactionPage(c));
     app.post("/app/scheduled", (c) => this.createScheduledTransactionRoute(c));
@@ -2169,8 +2171,14 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
     const due = document
       ? await this.processDueScheduledTransactions(document, bookId)
       : { autoPosted: 0, review: [] };
+    const accountRows = new Map(
+      (document?.accounts() ?? []).map((row) => [
+        row.guid,
+        { name: row.name, type: row.type },
+      ]),
+    );
     const accounts = new Map(
-      (document?.accounts() ?? []).map((row) => [row.guid, row.name]),
+      [...accountRows.entries()].map(([guid, row]) => [guid, row.name]),
     );
     const query = (c.req.query("q") ?? "").trim();
     const needle = query.toLowerCase();
@@ -2205,7 +2213,14 @@ ${topics.map(([title, body]) => `<div class="card" style="margin-bottom:1rem"><h
 <input id="void-reason-${escapeHtml(tx.guid)}" name="reason" type="text" required maxlength="200">
 <button type="submit" class="secondary">Void</button>
 </form>`;
-        return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}${tx.voided ? ` <span class="chip">VOID</span>` : ""}</h2><p class="muted">${escapeHtml(tx.datePosted.slice(0, 10))}</p><ul class="journal">${rows}</ul>${voidControls}</div>`;
+        const touchesBank = tx.splits.some(
+          (split) => accountRows.get(split.accountGuid)?.type === "BANK",
+        );
+        const printCheckLink =
+          !tx.voided && touchesBank
+            ? `<p><a href="/app/journal/${escapeHtml(tx.guid)}/print-check">Print check</a></p>`
+            : "";
+        return `<div class="card" style="margin-bottom:1rem"><h2 style="margin:0">${escapeHtml(tx.description)}${tx.voided ? ` <span class="chip">VOID</span>` : ""}</h2><p class="muted">${escapeHtml(tx.datePosted.slice(0, 10))}</p><ul class="journal">${rows}</ul>${printCheckLink}${voidControls}</div>`;
       })
       .join("");
     const reviewBanner = due.review.length
@@ -3337,6 +3352,138 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
       }
     }
     return c.redirect("/app/journal");
+  }
+
+  /**
+   * One built-in check layout, ported literally from desktop GnuCash's own
+   * `data/checks/quicken.chk` fixture (point coordinates, 72pt/inch) --
+   * verified against real GnuCash source, not invented. Milestone 1: one
+   * preset, one check per print (not the real 3-per-page Top/Middle/Bottom
+   * slot picker).
+   */
+  private static readonly CHECK_PRESET = {
+    pageWidthPt: 612,
+    checkHeightPt: 252,
+    translateYPt: 4,
+    payee: { x: 90, y: 102 },
+    amountWords: { x: 90, y: 132 },
+    amountNumber: { x: 500, y: 102 },
+    date: { x: 500, y: 67 },
+    memo: { x: 50, y: 212 },
+  } as const;
+
+  /** `BANK`-type splits a transaction touches, for the "Print check" entry point and account picker. */
+  private bankSplitChoices(
+    tx: XmlTransaction,
+    accounts: Map<string, { name: string; type: string }>,
+  ): Array<{ split: XmlSplit; accountName: string }> {
+    return tx.splits
+      .filter((split) => accounts.get(split.accountGuid)?.type === "BANK")
+      .map((split) => ({
+        split,
+        accountName: accounts.get(split.accountGuid)?.name ?? "?",
+      }));
+  }
+
+  private async printCheckPage(c: BookContext): Promise<Response> {
+    const session = await this.currentSession(c);
+    if (!session) return c.redirect("/app/login");
+    if (session.totp_verified !== 1) return c.redirect("/app/security/totp");
+    const bookId = c.get("bookId");
+    const document = await this.store.get(bookId);
+    const guid = c.req.param("guid") ?? "";
+    const tx = document?.transaction(guid);
+    if (!document || !tx) return c.text("Transaction not found", 404);
+    const accounts = new Map(
+      document.accounts().map((a) => [a.guid, { name: a.name, type: a.type }]),
+    );
+    const choices = this.bankSplitChoices(tx, accounts);
+    if (choices.length === 0) {
+      return c.text("This transaction doesn't touch a bank account.", 400);
+    }
+    const requestedAccount = c.req.query("account") ?? "";
+    const chosen =
+      choices.length === 1
+        ? choices[0]
+        : choices.find((choice) => choice.split.accountGuid === requestedAccount);
+    if (!chosen) {
+      const links = choices
+        .map(
+          (choice) =>
+            `<li><a href="/app/journal/${escapeHtml(tx.guid)}/print-check?account=${escapeHtml(choice.split.accountGuid)}">${escapeHtml(choice.accountName)}</a></li>`,
+        )
+        .join("");
+      return c.html(
+        this.appPage(
+          "Print check",
+          `<h1>Print check</h1>
+<p class="muted">This transaction touches more than one bank account. Which one are you writing the check from?</p>
+<ul>${links}</ul>
+<p><a href="/app/journal">Back</a></p>`,
+        ),
+        200,
+      );
+    }
+    if (chosen.split.value.num >= 0n) {
+      return c.html(
+        this.appPage(
+          "Print check",
+          `<h1>Print check</h1>
+<p class="error">${escapeHtml(chosen.accountName)} doesn't lose money in this transaction, so there's nothing to write a check for.</p>
+<p><a href="/app/journal">Back</a></p>`,
+        ),
+        200,
+      );
+    }
+    const fraction = 100n;
+    const amount = negateMoney(chosen.split.value);
+    let words: string;
+    try {
+      words = amountInWords(amount, fraction);
+    } catch {
+      return c.html(
+        this.appPage(
+          "Print check",
+          `<h1>Print check</h1>
+<p class="error">That amount can't be printed on a check.</p>
+<p><a href="/app/journal">Back</a></p>`,
+        ),
+        200,
+      );
+    }
+    const preset = Book.CHECK_PRESET;
+    return c.html(
+      `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Print check</title>
+<style>
+  @page { size: letter; margin: 0; }
+  body { margin: 0; font-family: "Courier New", Courier, monospace; }
+  .no-print { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; padding: 1rem; }
+  .check-page { position: relative; width: ${preset.pageWidthPt}pt; height: ${preset.checkHeightPt + preset.translateYPt}pt; }
+  .check-item { position: absolute; font-size: 11pt; white-space: nowrap; }
+  @media print { .no-print { display: none; } }
+</style>
+</head>
+<body>
+<div class="no-print">
+<p>Verify alignment with a blank sheet before printing on real check stock. Built-in layout only (Quicken/QuickBooks US-Letter, one check per page).</p>
+<button onclick="window.print()">Print</button>
+<a href="/app/journal">Back</a>
+</div>
+<div class="check-page">
+<div class="check-item" style="left:${preset.payee.x}pt;top:${preset.payee.y + preset.translateYPt}pt">${escapeHtml(tx.description)}</div>
+<div class="check-item" style="left:${preset.date.x}pt;top:${preset.date.y + preset.translateYPt}pt">${escapeHtml(tx.datePosted.slice(0, 10))}</div>
+<div class="check-item" style="left:${preset.amountNumber.x}pt;top:${preset.amountNumber.y + preset.translateYPt}pt">${escapeHtml(formatMoney(amount, fraction))}</div>
+<div class="check-item" style="left:${preset.amountWords.x}pt;top:${preset.amountWords.y + preset.translateYPt}pt">${escapeHtml(words)}</div>
+<div class="check-item" style="left:${preset.memo.x}pt;top:${preset.memo.y + preset.translateYPt}pt">${escapeHtml(tx.splits.find((s) => s.memo)?.memo ?? "")}</div>
+</div>
+</body>
+</html>`,
+      200,
+    );
   }
 
   private async newAccountPage(c: BookContext, error = ""): Promise<Response> {

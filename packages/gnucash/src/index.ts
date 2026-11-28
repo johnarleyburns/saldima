@@ -4,6 +4,7 @@ export * from "./book-file.ts";
 export * from "./guid.ts";
 export * from "./ledger.ts";
 export * from "./money.ts";
+export * from "./money-words.ts";
 export * from "./new-guid.ts";
 export * from "./recurrence.ts";
 export * from "./sqlite.ts";
